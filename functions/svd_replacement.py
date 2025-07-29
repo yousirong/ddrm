@@ -106,43 +106,94 @@ class GeneralH(H_functions):
         out[:, :self._U.shape[0]] = vec.clone().reshape(vec.shape[0], -1)
         return out
 
-#Inpainting
+import torch
+
 class Inpainting(H_functions):
     def __init__(self, channels, img_dim, missing_indices, device):
+        # 채널 수(C), 이미지 한 변의 픽셀 수(H=W), 마스크된 인덱스(missing_indices), 연산 디바이스(device) 저장
         self.channels = channels
         self.img_dim = img_dim
-        self._singulars = torch.ones(channels * img_dim**2 - missing_indices.shape[0]).to(device)
+        # 관측된(kept) 픽셀 개수 = 전체 픽셀 수 - 마스크된 픽셀 수
+        # singular 값은 1로 초기화
+        num_kept = channels * img_dim**2 - missing_indices.shape[0]
+        self._singulars = torch.ones(num_kept, device=device)
+        # 마스크된 인덱스와 관측된 인덱스 저장
         self.missing_indices = missing_indices
-        self.kept_indices = torch.Tensor([i for i in range(channels * img_dim**2) if i not in missing_indices]).to(device).long()
+        self.kept_indices = (
+            torch.tensor([i for i in range(channels * img_dim**2)
+                          if i not in missing_indices],
+                         device=device,
+                         dtype=torch.long)
+        )
 
     def V(self, vec):
+        """
+        V: 원공간 벡터(vec)를 spectral 공간으로 매핑
+        - 입력 vec: (batch_size, C*H*W)
+        - 출력: (batch_size, C*H*W)
+        """
+        # batch 차원 유지, flatten
         temp = vec.clone().reshape(vec.shape[0], -1)
         out = torch.zeros_like(temp)
+        # 앞부분: 관측된 픽셀 값 복사
         out[:, self.kept_indices] = temp[:, :self.kept_indices.shape[0]]
+        # 뒷부분: 마스크된 픽셀 값 복사
         out[:, self.missing_indices] = temp[:, self.kept_indices.shape[0]:]
-        return out.reshape(vec.shape[0], -1, self.channels).permute(0, 2, 1).reshape(vec.shape[0], -1)
+        # 채널 차원 복원 후 다시 flatten
+        return out.reshape(vec.shape[0], -1, self.channels) \
+                  .permute(0, 2, 1) \
+                  .reshape(vec.shape[0], -1)
 
     def Vt(self, vec):
-        temp = vec.clone().reshape(vec.shape[0], self.channels, -1).permute(0, 2, 1).reshape(vec.shape[0], -1)
+        """
+        Vt: spectral 공간 벡터(vec)를 원공간으로 매핑
+        - 입력 vec: (batch_size, C*H*W)
+        - 출력: (batch_size, C*H*W)
+        """
+        # batch, C, H*W 형태로 변환하고 채널 축으로 permute
+        temp = vec.clone() \
+                  .reshape(vec.shape[0], self.channels, -1) \
+                  .permute(0, 2, 1) \
+                  .reshape(vec.shape[0], -1)
         out = torch.zeros_like(temp)
+        # 앞부분: 관측된 픽셀 위치에 spectral 값 할당
         out[:, :self.kept_indices.shape[0]] = temp[:, self.kept_indices]
+        # 뒷부분: 마스크된 픽셀 위치에 spectral 값 할당
         out[:, self.kept_indices.shape[0]:] = temp[:, self.missing_indices]
         return out
 
     def U(self, vec):
+        """
+        U: identity 매핑 (원공간 그대로 반환)
+        """
         return vec.clone().reshape(vec.shape[0], -1)
 
     def Ut(self, vec):
+        """
+        Ut: identity 매핑 (원공간 그대로 반환)
+        """
         return vec.clone().reshape(vec.shape[0], -1)
 
     def singulars(self):
+        """
+        관측된 픽셀의 특이값 벡터 반환
+        """
         return self._singulars
 
     def add_zeros(self, vec):
-        temp = torch.zeros((vec.shape[0], self.channels * self.img_dim**2), device=vec.device)
-        reshaped = vec.clone().reshape(vec.shape[0], -1)
+        """
+        마스크된 영역에 0을 추가하여 전체 차원으로 확장
+        - 입력 vec: (batch_size, kept_dim)
+        - 출력: (batch_size, C*H*W), 뒷부분이 0 채워짐
+        """
+        batch_size = vec.shape[0]
+        total_dim = self.channels * self.img_dim**2
+        temp = torch.zeros((batch_size, total_dim), device=vec.device)
+        reshaped = vec.clone().reshape(batch_size, -1)
+        # 앞부분에 관측된 값 복사, 나머지는 0으로 유지
         temp[:, :reshaped.shape[1]] = reshaped
         return temp
+
 
 #Denoising
 class Denoising(H_functions):

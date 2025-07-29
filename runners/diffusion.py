@@ -92,7 +92,7 @@ class Diffusion(object):
 
     def sample(self):
         cls_fn = None
-        if self.config.model.type == 'simple':    
+        if self.config.model.type == 'simple':
             model = Model(self.config)
             # This used the pretrained DDPM model, see https://github.com/pesser/pytorch_diffusion
             if self.config.data.dataset == "CIFAR10":
@@ -130,8 +130,8 @@ class Diffusion(object):
                 ckpt = os.path.join(self.args.exp, "logs/imagenet/256x256_diffusion_uncond.pt")
                 if not os.path.exists(ckpt):
                     download('https://openaipublic.blob.core.windows.net/diffusion/jul-2021/256x256_diffusion_uncond.pt', ckpt)
-                
-            
+
+
             model.load_state_dict(torch.load(ckpt, map_location=self.device))
             model.to(self.device)
             model.eval()
@@ -167,9 +167,9 @@ class Diffusion(object):
 
         #get original images and corrupted y_0
         dataset, test_dataset = get_dataset(args, config)
-        
+
         device_count = torch.cuda.device_count()
-        
+
         if args.subset_start >= 0 and args.subset_end > 0:
             assert args.subset_end > args.subset_start
             test_dataset = torch.utils.data.Subset(test_dataset, range(args.subset_start, args.subset_end))
@@ -177,8 +177,8 @@ class Diffusion(object):
             args.subset_start = 0
             args.subset_end = len(test_dataset)
 
-        print(f'Dataset has size {len(test_dataset)}')    
-        
+        print(f'Dataset has size {len(test_dataset)}')
+
         def seed_worker(worker_id):
             worker_seed = args.seed % 2**32
             np.random.seed(worker_seed)
@@ -194,7 +194,7 @@ class Diffusion(object):
             worker_init_fn=seed_worker,
             generator=g,
         )
-        
+
 
         ## get degradation matrix ##
         deg = args.deg
@@ -270,7 +270,7 @@ class Diffusion(object):
             quit()
         args.sigma_0 = 2 * args.sigma_0 #to account for scaling to [-1,1]
         sigma_0 = args.sigma_0
-        
+
         print(f'Start from {args.subset_start}')
         idx_init = args.subset_start
         idx_so_far = args.subset_start
@@ -333,7 +333,7 @@ class Diffusion(object):
     def sample_image(self, x, model, H_funcs, y_0, sigma_0, last=True, cls_fn=None, classes=None):
         skip = self.num_timesteps // self.args.timesteps
         seq = range(0, self.num_timesteps, skip)
-        
+
         x = efficient_generalized_steps(x, seq, model, self.betas, H_funcs, y_0, sigma_0, \
             etaB=self.args.etaB, etaA=self.args.eta, etaC=self.args.eta, cls_fn=cls_fn, classes=classes)
         if last:

@@ -10,7 +10,7 @@ DDRM uses pre-trained [DDPMs](https://hojonathanho.github.io/diffusion/) for sol
 <img src="figures/ddrm-overview.png" alt="ddrm-overview" style="width:800px;"/>
 
 ## Running the Experiments
-The code has been tested on PyTorch 1.8 and PyTorch 1.10. Please refer to `environment.yml` for a list of conda/mamba environments that can be used to run the code. 
+The code has been tested on PyTorch 1.8 and PyTorch 1.10. Please refer to `environment.yml` for a list of conda/mamba environments that can be used to run the code.
 
 ### Pretrained models
 We use pretrained models from [https://github.com/openai/guided-diffusion](https://github.com/openai/guided-diffusion), [https://github.com/pesser/pytorch_diffusion](https://github.com/pesser/pytorch_diffusion) and [https://github.com/ermongroup/SDEdit](https://github.com/ermongroup/SDEdit)
@@ -101,3 +101,20 @@ This implementation is based on / inspired by:
 - [https://github.com/hojonathanho/diffusion](https://github.com/hojonathanho/diffusion) (the DDPM TensorFlow repo),
 - [https://github.com/pesser/pytorch_diffusion](https://github.com/pesser/pytorch_diffusion) (PyTorch helper that loads the DDPM model), and
 - [https://github.com/ermongroup/ddim](https://github.com/ermongroup/ddim) (code structure)
+
+
+```bash
+export CUDA_VISIBLE_DEVICES=1
+python main.py --ni   --config imagenet_256.yml   --doc imagenet_inpainting   --timesteps 20   --eta 0.85   --etaB 1   --deg inp   --sigma_0 0.0   -i imagenet_inp
+
+python main.py --ni \
+  --config imagenet_256.yml \
+  --doc imagenet_inpainting_stronger \
+  --timesteps 20 \
+  --eta 1.0 \
+  --etaB 1 \
+  --deg inp \
+  --sigma_0 1.0 \
+  -i imagenet_inp
+
+```
