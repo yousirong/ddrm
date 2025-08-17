@@ -78,6 +78,11 @@ def parse_args_and_config():
     parser.add_argument(
         '--subset_end', type=int, default=-1
     )
+    parser.add_argument(
+        "--use_ddnm",
+        action="store_true",
+        help="Whether to use DDNM-based sampling",
+    )
 
     args = parser.parse_args()
     args.log_path = os.path.join(args.exp, "logs", args.doc)

@@ -42,7 +42,7 @@ class H_functions:
         Adds trailing zeros to turn a vector from the small dimension (U) to the big dimension (V)
         """
         raise NotImplementedError()
-    
+
     def H(self, vec):
         """
         Multiplies the input vector by H
@@ -50,7 +50,7 @@ class H_functions:
         temp = self.Vt(vec)
         singulars = self.singulars()
         return self.U(singulars * temp[:, :singulars.shape[0]])
-    
+
     def Ht(self, vec):
         """
         Multiplies the input vector by H transposed
@@ -58,7 +58,7 @@ class H_functions:
         temp = self.Ut(vec)
         singulars = self.singulars()
         return self.V(self.add_zeros(singulars * temp[:, :singulars.shape[0]]))
-    
+
     def H_pinv(self, vec):
         """
         Multiplies the input vector by the pseudo inverse of H
@@ -106,93 +106,150 @@ class GeneralH(H_functions):
         out[:, :self._U.shape[0]] = vec.clone().reshape(vec.shape[0], -1)
         return out
 
+
 import torch
+from torch import Tensor
+
+# functions/svd_replacement.py — Inpainting (device-safe, channel-aware)
+# - 인덱스 텐서를 언제나 타깃 텐서와 같은 device/long dtype으로 맞춰 안전 인덱싱
+# - missing_indices는 [0, C*H*W) 평면 인덱스(채널 포함)라고 가정
+# - kept_indices는 벡터화로 계산(파이썬 루프/멤버십 연산 제거)
+# - Vt: 원래 순서 → [kept | missing] 재배열
+# - V : [kept | missing] → 원래 순서 복원
+# - H : 관측(kept)만 추출
+# - H_pinv/add_zeros : kept 위치에만 값을 채워 전체 길이로 확장
+
 
 class Inpainting(H_functions):
-    def __init__(self, channels, img_dim, missing_indices, device):
-        # 채널 수(C), 이미지 한 변의 픽셀 수(H=W), 마스크된 인덱스(missing_indices), 연산 디바이스(device) 저장
-        self.channels = channels
-        self.img_dim = img_dim
-        # 관측된(kept) 픽셀 개수 = 전체 픽셀 수 - 마스크된 픽셀 수
-        # singular 값은 1로 초기화
-        num_kept = channels * img_dim**2 - missing_indices.shape[0]
-        self._singulars = torch.ones(num_kept, device=device)
-        # 마스크된 인덱스와 관측된 인덱스 저장
-        self.missing_indices = missing_indices
-        self.kept_indices = (
-            torch.tensor([i for i in range(channels * img_dim**2)
-                          if i not in missing_indices],
-                         device=device,
-                         dtype=torch.long)
-        )
+    def __init__(self, channels: int, img_dims: tuple, missing_indices: Tensor, device: torch.device):
+        """
+        channels: C
+        img_dims : (H, W)
+        missing_indices: 길이 M 의 1D long tensor (채널까지 flatten 된 인덱스)
+        device: 연산 디바이스
+        """
+        self.channels = int(channels)
+        
+        # img_dims가 정수인 경우 (H, W) 튜플로 변환
+        if isinstance(img_dims, int):
+            self.img_dims = (img_dims, img_dims)
+        else:
+            self.img_dims = img_dims
+        
+        self.device = device
 
-    def V(self, vec):
-        """
-        V: 원공간 벡터(vec)를 spectral 공간으로 매핑
-        - 입력 vec: (batch_size, C*H*W)
-        - 출력: (batch_size, C*H*W)
-        """
-        # batch 차원 유지, flatten
-        temp = vec.clone().reshape(vec.shape[0], -1)
-        out = torch.zeros_like(temp)
-        # 앞부분: 관측된 픽셀 값 복사
-        out[:, self.kept_indices] = temp[:, :self.kept_indices.shape[0]]
-        # 뒷부분: 마스크된 픽셀 값 복사
-        out[:, self.missing_indices] = temp[:, self.kept_indices.shape[0]:]
-        # 채널 차원 복원 후 다시 flatten
-        return out.reshape(vec.shape[0], -1, self.channels) \
-                  .permute(0, 2, 1) \
-                  .reshape(vec.shape[0], -1)
+        N = self.channels * self.img_dims[0] * self.img_dims[1]
 
-    def Vt(self, vec):
+        # missing_indices 정리: long, 고유/정렬, 디바이스 일치
+        mi = missing_indices
+        if mi.dtype != torch.long:
+            mi = mi.long()
+        if mi.device != device:
+            mi = mi.to(device)
+        # 고유/정렬(안전)
+        mi = torch.unique(mi)
+        mi, _ = torch.sort(mi)
+        self.missing_indices: Tensor = mi  # [M]
+
+        # kept_indices = 전체 중 missing 제외 (벡터화)
+        mask = torch.ones(N, dtype=torch.bool, device=device)
+        mask[mi] = False
+        self.kept_indices: Tensor = torch.nonzero(mask, as_tuple=False).squeeze(1).long()  # [K]
+
+        # 특이값(관측 K 차원에 대해 1로)
+        self._singulars: Tensor = torch.ones(self.kept_indices.numel(), device=device)
+
+    # ---------- 내부 유틸 ----------
+    @staticmethod
+    def _idx_like(idx: Tensor, ref: Tensor) -> Tensor:
+        """ref와 같은 device/long으로 맞춘 인덱스 반환"""
+        if idx.dtype != torch.long:
+            idx = idx.long()
+        if idx.device != ref.device:
+            idx = idx.to(ref.device)
+        return idx
+
+    # ---------- SVD 유사 연산 ----------
+    def Vt(self, vec: Tensor) -> Tensor:
         """
-        Vt: spectral 공간 벡터(vec)를 원공간으로 매핑
-        - 입력 vec: (batch_size, C*H*W)
-        - 출력: (batch_size, C*H*W)
+        원래 순서의 벡터 → [kept | missing] 순서로 재배열
+        vec: [B, N] 또는 [B, C*H*W]
+        return: [B, N] (앞쪽 K는 kept, 뒤쪽 M은 missing)
         """
-        # batch, C, H*W 형태로 변환하고 채널 축으로 permute
-        temp = vec.clone() \
-                  .reshape(vec.shape[0], self.channels, -1) \
-                  .permute(0, 2, 1) \
-                  .reshape(vec.shape[0], -1)
-        out = torch.zeros_like(temp)
-        # 앞부분: 관측된 픽셀 위치에 spectral 값 할당
-        out[:, :self.kept_indices.shape[0]] = temp[:, self.kept_indices]
-        # 뒷부분: 마스크된 픽셀 위치에 spectral 값 할당
-        out[:, self.kept_indices.shape[0]:] = temp[:, self.missing_indices]
+        B = vec.shape[0]
+        temp = vec.reshape(B, -1)  # [B, N]
+        idx_k = self._idx_like(self.kept_indices, temp)
+        idx_m = self._idx_like(self.missing_indices, temp)
+        K = idx_k.numel()
+
+        out = temp.new_empty(B, temp.shape[1])
+        out[:, :K] = temp.index_select(1, idx_k)
+        out[:, K:] = temp.index_select(1, idx_m)
         return out
 
-    def U(self, vec):
+    def V(self, vec: Tensor) -> Tensor:
         """
-        U: identity 매핑 (원공간 그대로 반환)
+        [kept | missing] 순서의 벡터 → 원래 순서로 복원
+        vec: [B, N] (앞쪽 K가 kept, 뒤쪽 M이 missing)
+        return: [B, N]
         """
-        return vec.clone().reshape(vec.shape[0], -1)
+        B = vec.shape[0]
+        temp = vec.reshape(B, -1)  # [B, N]
+        idx_k = self._idx_like(self.kept_indices, temp)
+        idx_m = self._idx_like(self.missing_indices, temp)
+        K = idx_k.numel()
 
-    def Ut(self, vec):
-        """
-        Ut: identity 매핑 (원공간 그대로 반환)
-        """
-        return vec.clone().reshape(vec.shape[0], -1)
+        out = temp.new_empty(B, temp.shape[1])
+        out.index_copy_(1, idx_k, temp[:, :K])
+        out.index_copy_(1, idx_m, temp[:, K:])
+        return out
 
-    def singulars(self):
-        """
-        관측된 픽셀의 특이값 벡터 반환
-        """
+    def U(self, vec: Tensor) -> Tensor:
+        """측정 공간에서의 항등 매핑(프로젝트 구현과의 호환용)."""
+        return vec.reshape(vec.shape[0], -1).clone()
+
+    def Ut(self, vec: Tensor) -> Tensor:
+        """측정 공간에서의 항등 매핑(프로젝트 구현과의 호환용)."""
+        return vec.reshape(vec.shape[0], -1).clone()
+
+    def singulars(self) -> Tensor:
+        """관측(kept) 차원의 특이값(여기서는 모두 1)."""
         return self._singulars
 
-    def add_zeros(self, vec):
+    # ---------- 선형 관측 H ----------
+    def H(self, x: Tensor) -> Tensor:
         """
-        마스크된 영역에 0을 추가하여 전체 차원으로 확장
-        - 입력 vec: (batch_size, kept_dim)
-        - 출력: (batch_size, C*H*W), 뒷부분이 0 채워짐
+        관측 연산: kept 위치의 값만 추출
+        x: [B, C, H, W] 또는 [B, N]
+        return: [B, K]
         """
-        batch_size = vec.shape[0]
-        total_dim = self.channels * self.img_dim**2
-        temp = torch.zeros((batch_size, total_dim), device=vec.device)
-        reshaped = vec.clone().reshape(batch_size, -1)
-        # 앞부분에 관측된 값 복사, 나머지는 0으로 유지
-        temp[:, :reshaped.shape[1]] = reshaped
-        return temp
+        B = x.shape[0]
+        temp = x.reshape(B, -1)
+        idx_k = self._idx_like(self.kept_indices, temp)
+        return temp.index_select(1, idx_k)
+
+    def H_pinv(self, y: Tensor) -> Tensor:
+        """
+        의사역행렬: kept 위치에만 y를 채워 전체 길이로 확장(나머지는 0)
+        y: [B, K]
+        return: [B, N] (평면 벡터)
+        """
+        B = y.shape[0]
+        N = self.channels * self.img_dims[0] * self.img_dims[1]
+        out = y.new_zeros((B, N))
+        idx_k = self._idx_like(self.kept_indices, out)
+        out.index_copy_(1, idx_k, y)
+        return out
+
+    # ---------- 유틸 ----------
+    def add_zeros(self, vec: Tensor) -> Tensor:
+        """
+        kept 길이의 벡터를 전체 길이로 확장(kept 위치에만 값, 나머지는 0)
+        vec: [B, K]
+        return: [B, N]
+        """
+        return self.H_pinv(vec)
+
 
 
 #Denoising

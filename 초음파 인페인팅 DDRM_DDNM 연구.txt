@@ -1,0 +1,405 @@
+﻿US-DDNM: 반점-인식 Null-Space 정제를 통한 실시간 유방 초음파 인페인팅을 위한 도메인 적응형 확산 모델
+
+
+
+
+1. 서론
+
+
+
+
+1.1. 임상적 동기 및 문제 정의
+
+
+유방 초음파(Breast Ultrasound, BUS) 영상은 유방암 진단 및 중재 시술에서 핵심적인 역할을 수행하는 비침습적이고 경제적인 영상 기법이다.1 이 기술의 임상적 활용도를 극대화하기 위한 노력의 일환으로, 영상 인페인팅(inpainting) 기술은 상당한 잠재력을 지니고 있다. 영상 인페인팅은 손상되거나 누락된 영상 영역을 주변 문맥 정보를 활용하여 복원하는 기술로, 유방 초음파 분야에서 다음과 같은 구체적인 임상 시나리오에 적용될 수 있다. 첫째,
+가상 수술 계획에서 종양 제거 후의 미용적 결과를 환자에게 시각적으로 예측하여 제공함으로써, 유방 보존술(lumpectomy)과 같은 치료 계획 수립 과정에서 환자의 의사결정을 지원할 수 있다.2 둘째, 갈비뼈나 석회화로 인한 **음향 그림자(acoustic shadowing)**와 같이 진단적으로 중요한 후방 조직의 평가를 방해하는 아티팩트를 제거하고 해당 영역을 해부학적으로 타당한 조직으로 채워 넣어 진단의 정확성을 높일 수 있다.4 마지막으로, 희귀 사례나 특정 병변에 대한 데이터 부족 문제를 해결하기 위해, 사실적인 주석이 달린 BUS 영상을 생성하는
+데이터 증강(data augmentation) 기법으로 활용될 수 있으며, 이는 진단 모델의 성능과 강건성을 향상시키는 데 기여한다.7
+그러나 자연 영상(natural image)을 대상으로 개발된 기존의 범용 인페인팅 모델들은 BUS 영상에 직접 적용될 때 심각한 성능 저하를 보인다. 이러한 실패의 근본적인 원인은 자연 영상과 초음파 영상 간의 본질적인 **도메인 격차(domain gap)**에 있다. 본 연구는 이러한 도메인 특수성을 극복하고 임상 환경에 실질적으로 기여할 수 있는 고성능 유방 초음파 인페인팅 모델 개발을 목표로 한다.
+
+
+1.2. 이중적 도전 과제: 도메인 특화 노이즈와 연산 지연
+
+
+BUS 영상 인페인팅의 성공적인 구현을 가로막는 핵심적인 도전 과제는 두 가지로 요약될 수 있다.
+첫 번째는 도메인 격차, 특히 초음파 영상 고유의 통계적 특성이다. BUS 영상은 낮은 신호 대 잡음비(low signal-to-noise ratio), 검사자 의존성, 그리고 복잡한 조직 질감(texture)을 특징으로 한다.1 이 중 가장 결정적인 요소는 **반점 노이즈(speckle noise)**의 존재이다. 반점 노이즈는 초음파의 간섭성(coherence)으로 인해 발생하는 신호 의존적(signal-dependent)이며 곱셈적으로(multiplicative) 작용하는 아티팩트로, 표준 확산 모델의 기본 가정인 덧셈적 가우시안 노이즈(additive Gaussian noise) 가정을 정면으로 위배한다.10 따라서, 이러한 통계적 특성을 고려하지 않는 모델은 초음파 고유의 질감을 사실적으로 재현하지 못하고, 과도하게 평활화(over-smoothing)되거나 비현실적인 아티팩트를 생성하는 한계를 보인다.
+두 번째는 연산 지연(latency) 문제이다. 확산 확률 모델(Denoising Diffusion Probabilistic Models, DDPMs)은 고품질의 영상을 생성하는 데 탁월한 성능을 보이지만, 하나의 샘플을 생성하기 위해 수백에서 수천 번의 반복적인 추론 단계가 필요하다.13 이러한 막대한 연산 비용은 사용자와의 상호작용이 필수적인 임상 환경, 예를 들어 실시간으로 수술 계획을 수정하거나 아티팩트 제거 결과를 확인해야 하는 상황에서 확산 모델의 적용을 사실상 불가능하게 만드는 결정적인 장벽으로 작용한다.
+
+
+1.3. 제안된 해결책 및 핵심 기여
+
+
+본 논문은 이러한 이중적 도전 과제를 해결하기 위한 통합적 프레임워크로, **초음파 적응형 잡음 제거 확산 Null-space 모델(Ultrasound-Adapted Denoising Diffusion Null-space Model, US-DDNM)**을 제안한다. 제안하는 모델의 핵심 기여는 다음과 같이 요약된다.
+1. 반점-인식 확산 프로세스 (Speckle-Aware Diffusion Process): 초음파 영상의 곱셈적 반점 노이즈 특성을 모델링하기 위해, 로그 변환(logarithmic transform)된 도메인에서 순방향 및 역방향 확산 프로세스를 수행하는 새로운 방법을 제안한다. 이는 모델이 곱셈적 노이즈 통계와 무관하게 조직 고유의 반사도(reflectivity) 분포에 대한 생성적 사전 지식(generative prior)을 학습하도록 강제한다.
+2. 효율적이고 정확한 데이터 일관성 (Efficient and Exact Data Consistency): DDRM(Denoising Diffusion Restoration Models)의 SVD(Singular Value Decomposition) 기반 접근법이 가지는 계산적 비효율성을 극복하기 위해, DDNM(Denoising Diffusion Null-Space Model) 프레임워크를 채택한다.15 DDNM의 핵심 원리인 범위-영공간 분해(Range-Null Space Decomposition, RND)를 활용하여, 매 역방향 추론 단계마다 알려진 영상 영역에 대한 완벽한 데이터 일관성을 해석적으로(analytically) 보장하며, 이는 인페인팅 작업에서 SVD 연산을 완전히 배제하여 계산 효율성을 극대화한다.19
+3. 실시간에 가까운 추론 (Near Real-Time Inference): 임상적 활용을 위한 실시간성 확보를 위해, 고차 상미분방정식(Ordinary Differential Equation, ODE) 솔버인 DPM-Solver를 역방향 샘플링 과정에 통합한다.21 DPM-Solver는 샘플링에 필요한 함수 평가 횟수(Number of Function Evaluations, NFEs)를 10-20회 수준으로 획기적으로 줄여, 기존 확산 모델 대비 수십 배 빠른 추론 속도를 달성하고 임상적으로 실용 가능한 성능을 제공한다.
+4. 포괄적인 도메인 특화 검증 (Comprehensive Domain-Specific Validation): 제안 모델의 성능을 정량적으로 평가하기 위해, 표준적인 영상 품질 지표뿐만 아니라, 생성된 조직 질감의 사실성을 평가하는 데 매우 중요한 도메인 특화 지표인 일반화된 대조도 대 잡음비(Generalized Contrast-to-Noise Ratio, gCNR)를 도입하여 엄격한 검증을 수행한다.23
+이러한 기여들은 독립적인 개선이 아니라 상호 보완적인 시너지 효과를 창출한다. 반점-인식 프로세스는 학습된 사전 지식을 더 정확하게 만들고, 이는 Null-space 예측의 타당성을 높인다. 더 타당한 예측은 수렴에 더 적은 교정 단계를 필요로 하며, 이는 DPM-Solver와 같은 고차 솔버가 그 잠재력을 최대한 발휘할 수 있는 이상적인 조건을 형성한다. 즉, 초음파 물리학에 기반한 도메인 적응이 추론 가속화를 직접적으로 가능하게 함으로써, 전체 시스템이 각 부분의 합보다 더 큰 성능을 발휘하도록 설계되었다.
+
+
+2. 관련 연구 및 기초 개념
+
+
+
+
+2.1. 영상 복원을 위한 확산 모델
+
+
+확산 모델은 고정된 노이즈 추가 과정(forward process)을 역으로 되돌리는 것을 학습함으로써 데이터 분포를 모델링하는 생성 모델의 한 종류이다.24 최근 영상 복원 분야에서 이러한 확산 모델을 활용하려는 연구가 활발히 진행되고 있다.
+
+
+2.1.1. DDRM (Denoising Diffusion Restoration Models)
+
+
+DDRM은 사전 훈련된 생성적 사전 지식을 활용하여 별도의 과제 특화 훈련 없이 일반적인 선형 역 문제를 해결하는 선구적인 프레임워크이다.15 DDRM의 핵심 아이디어는 변분 추론(variational inference)에 기반하며, 열화 연산자(degradation operator)
+H의 특이값 분해(SVD)를 통해 얻어지는 스펙트럼 공간(spectral space)에서 역 문제를 해결한다.15 구체적으로, 측정값
+y가 주어졌을 때, y=Hx+n의 관계를 만족하는 원본 영상 x의 사후 분포(posterior distribution) $p(x|y)$로부터 샘플링을 수행한다. 그러나 SVD는 연산자 H의 차원이 클 경우 막대한 계산 비용과 메모리를 요구하는 단점이 있어, 특히 고해상도 영상이나 복잡한 연산자를 다룰 때 확장성에 한계를 보인다.20
+
+
+2.1.2. DDNM (Denoising Diffusion Null-Space Model)
+
+
+DDNM은 DDRM의 한계를 극복하기 위해 제안된 더 효율적이고 유연한 프레임워크이다.16 DDNM의 핵심 혁신은
+범위-영공간 분해(Range-Null Space Decomposition, RND) 원리를 도입한 것이다.19 선형 시스템
+y=Ax에서, 측정값 y는 원본 신호 x의 정보 중 연산자 A의 범위 공간(range-space)에 해당하는 성분만을 담고 있으며, 영공간(null-space)에 해당하는 정보는 소실된다. DDNM은 매 역방향 샘플링 단계에서 예측된 영상 x^0​의 범위 공간 성분을 측정값 y와 일치하도록 해석적으로 교정하고, 영공간 성분은 생성 모델의 사전 지식에 의해 채워지도록 한다.18 인페인팅과 같이 열화 연산자가 이진 마스크인 경우, 이 과정은 SVD 없이 간단한 행렬 연산으로 수행될 수 있어 계산적으로 매우 효율적이다.28 또한, 잡음이 있는 측정값을 처리하기 위한 확장 버전인 DDNM+도 제안되었다.17
+
+
+2.1.3. 가속 샘플링: DDIM과 DPM-Solver
+
+
+확산 모델의 느린 샘플링 속도를 개선하기 위해 다양한 기법이 개발되었다. DDIM(Denoising Diffusion Implicit Models)은 비마르코프(non-Markovian) 역방향 프로세스를 정의하여 결정론적(deterministic) 샘플링을 가능하게 함으로써 DDPM 대비 빠른 추론을 달성한 초기 연구이다.29 하지만 DDIM은 본질적으로 1차 ODE 솔버에 해당하여, 여전히 수십에서 수백 번의 단계가 필요하다.21
+최근에는 DPM-Solver와 같은 고차 ODE 솔버가 제안되어 샘플링 속도를 획기적으로 개선했다.21 DPM-Solver는 확산 ODE의 이산화 오차(discretization error)를 줄임으로써 더 큰 스텝 크기로도 정확한 해를 근사할 수 있다. 이를 통해 단 10-20번의 함수 평가만으로 고품질의 샘플을 생성할 수 있어, DDIM 대비 10배 이상의 속도 향상을 보인다.21
+
+
+2.2. 유방 초음파 영상의 고유한 물리적 특성
+
+
+제안하는 방법론의 타당성을 확보하기 위해서는 유방 초음파 영상의 도메인 특수성에 대한 깊은 이해가 선행되어야 한다. 이는 기존 생성 모델의 가정이 왜 초음파 영상에 부적합한지를 명확히 하고, 물리 기반의 새로운 접근법이 필요한 이유를 설명한다.
+
+
+2.2.1. 곱셈적 현상으로서의 반점 노이즈
+
+
+반점 노이즈는 조직 내 미세한 산란체들로부터 반사된 초음파 파동의 간섭 현상에 의해 발생한다.10 이 노이즈는 신호의 강도에 비례하여 나타나는
+곱셈적(multiplicative) 노이즈의 특성을 가지며, 통계적으로는 레일리(Rayleigh) 또는 감마(Gamma) 분포를 따르는 것으로 모델링된다.12 이는 표준 DDPM이 가정하는 덧셈적 가우시안 노이즈와 근본적으로 다르다. 이러한 통계적 불일치는 모델이 반점 노이즈를 영상의 일부 구조로 오인하게 만들어, 결과적으로 비현실적인 질감을 생성하게 하는 주요 원인이 된다.
+
+
+2.2.2. 동형 필터링과 도메인 변환
+
+
+전통적인 신호 처리 분야에서 곱셈적 노이즈를 다루기 위해 사용된 기법이 동형 필터링(homomorphic filtering)이다. 이 기법은 로그 변환을 통해 곱셈적 노이즈를 덧셈적 노이즈로 변환하고, 로그 도메인에서 표준적인 잡음 제거 필터를 적용한 후, 지수 변환을 통해 다시 원래의 영상 도메인으로 복원하는 과정을 포함한다.12 이 원리는 본 연구에서 제안하는 반점-인식 확산 프로세스의 이론적 기반을 제공한다.
+
+
+2.2.3. 임상적으로 유의미한 특징 및 아티팩트
+
+
+성공적인 인페인팅 모델은 단순히 누락된 영역을 채우는 것을 넘어, 임상적으로 유의미한 특징들을 사실적으로 생성하거나 보존해야 한다. 여기에는 섬유선(fibroglandular) 조직과 지방 조직 간의 특징적인 질감 차이 1, 낭종 후방에서 나타나는
+후방 음향 증강(posterior acoustic enhancement), 그리고 치밀한 종괴나 석회화 후방에서 나타나는 **후방 음향 감쇠(acoustic shadowing)**와 같은 진단적으로 중요한 아티팩트가 포함된다.4 모델이 이러한 특징들을 얼마나 잘 처리하는지는 정성적 평가의 핵심 기준이 될 것이다.
+이러한 분석은 의료 영상 생성 모델링의 패러다임 전환을 시사한다. 초기 딥러닝 접근법이 단순히 컴퓨터 비전 아키텍처를 의료 데이터에 적용하는 수준이었다면 37, DRUS/WDRUS와 같은 연구는 초음파 재구성 연산자
+H와 비백색 잡음(non-white noise)의 특성을 고려하여 DDRM을 적용하는 중간 단계를 보여주었다.39 본 연구는 여기서 한 단계 더 나아가, 최종 B-모드 영상 자체의 통계적 특성, 즉 반점 노이즈의 물리적 형성 과정을 확산 모델의 순방향 프로세스 $q(x_t|x_0)$에 직접 통합한다. 이는 향후 MRI의 라이시안(Rician) 노이즈나 CT의 포아송(Poisson) 노이즈와 같이, 다른 영상 modality의 고유한 노이즈 모델을 확산 프로세스에 직접 내장하는 새로운 연구 방향을 제시한다. 이러한 물리 정보 기반 접근법은 모델의 데이터 효율성을 높이고, 생성 결과물의 물리적 타당성을 극대화할 수 있다.
+
+
+3. 제안 방법론: US-DDNM 프레임워크
+
+
+
+
+3.1. 로그 도메인에서의 반점-인식 확산
+
+
+표준 DDPM의 순방향 프로세스는 덧셈적 가우시안 노이즈를 가정하며, 다음과 같이 정의된다: q(xt​∣x0​)=N(xt​;αˉt​​x0​,(1−αˉt​)I). 본 연구에서는 이 가정을 초음파 영상의 물리적 특성에 맞게 수정한다.
+초음파 영상 I가 주어졌을 때, 먼저 반점-인식 변환을 적용한다. 동형 필터링 원리에 기반하여 12, 변환된 영상 $I_{log}$는 $I_{log} = \log(I + \epsilon)$으로 정의된다. 여기서
+ϵ은 $\log(0)$을 방지하기 위한 작은 상수이다. 이 로그 도메인에서, 원본 영상 I의 곱셈적 반점 노이즈는 근사적으로 덧셈적 노이즈로 변환된다.
+제안하는 순방향 프로세스는 이 변환된 영상 $I_{log}$에 대해 정의된다:
+q(Ilog,t​∣Ilog,0​)=N(Ilog,t​;αˉt​​Ilog,0​,(1−αˉt​)I)
+이에 따라, 잡음 제거 네트워크 $\epsilon_{\theta}$는 노이즈가 추가된 로그 도메인 영상 $I_{log,t}$로부터 추가된 가우시안 노이즈를 예측하도록 훈련된다. 이 접근법은 학습 목표를 근본적으로 변경하여, 모델이 반점 노이즈가 제거된 기저 조직의 로그 강도(log-intensity) 분포를 학습하도록 유도한다.
+
+
+3.2. 유도된 Null-Space 정제를 통한 역방향 프로세스
+
+
+역방향 프로세스는 순수 가우시안 노이즈 $I_{log,T} \sim \mathcal{N}(0, I)$로부터 원본 로그 도메인 영상 $I_{log,0}$을 복원하는 것을 목표로 한다. 각 시간 단계 t에서, 모델은 현재 상태 $I_{log,t}$로부터 "깨끗한" 로그 도메인 영상의 예측치인 $\hat{I}_{log,0|t}$를 생성한다.
+인페인팅 마스크를 M (알려진 픽셀은 1, 모르는 픽셀은 0)이라고 할 때, 인페인팅을 위한 열화 연산자 A는 마스크 M과의 원소별 곱셈으로 정의된다. 따라서 관측된 데이터는 y=M⊙I이며, 로그 도메인에서는 $y_{log} = M \odot I_{log}$가 된다.
+여기서 DDNM의 범위-영공간 분해(RND) 원리를 로그 도메인에 적용한다.19
+* 범위 공간(Range-space): 알려진 픽셀(M=1)에 해당하며, 이 공간의 정보는 입력 영상과 일관성을 유지해야 한다.
+* 영공간(Null-space): 누락된 픽셀(M=0)에 해당하며, 이 공간의 정보는 확산 모델의 생성적 사전 지식에 의해 채워진다.
+각 시간 단계 t에서의 교정 단계는 다음과 같이 수행된다:
+1. 로그 도메인에서 깨끗한 영상을 예측한다: I^log,0∣t​=f(Ilog,t​,t).
+2. RND를 사용하여 데이터 일관성을 강제한다:
+Ilog,0∣tcorrected​=ylog​+(1−M)⊙I^log,0∣t​
+이 단계는 DDNM의 핵심으로, 알려진 영역을 원본 데이터로 해석적으로 대체하고, 알려지지 않은 영역은 생성된 콘텐츠를 유지한다.
+3. 이 교정된 $\hat{I}^{corrected}{log,0|t}$를 사용하여 선택된 샘플러의 업데이트 규칙에 따라 다음 단계의 샘플 $I{log, t-1}$을 계산한다.
+모든 샘플링 단계가 완료된 후, 최종 결과물인 $I_{log,0}$은 지수 변환 Ifinal​=exp(Ilog,0​)−ϵ을 통해 다시 원래의 영상 도메인으로 복원된다.
+
+
+3.3. DPM-Solver 통합을 통한 실시간 추론
+
+
+제안 모델의 임상적 실용성을 확보하기 위해, 역방향 프로세스에 DPM-Solver를 통합한다. 표준 DDPM/DDIM 샘플러가 수백 번의 반복을 요구하는 반면, DPM-Solver는 이 과정을 획기적으로 단축시킨다.21
+본 시스템의 확률 흐름 ODE(Probability Flow ODE)는 로그 도메인에서 정의된다. DPM-Solver에 필요한 model_fn은 $I_{log,t}$에 대해 작동하도록 훈련된 잡음 제거기 $\epsilon_{\theta}$가 된다. 각 솔버 단계에서, 데이터 일관성 교정(3.2절)을 거친 $\hat{I}^{corrected}_{log,0|t}$는 ODE 궤적의 종점에 대한 더 정확한 추정치를 제공한다. 이 교정된 값은 DPM-Solver의 고차 업데이트 방정식 내에서 다음 상태를 높은 정확도로 계산하는 데 사용된다.21
+본 연구에서는 특히 유도된 샘플링(guided sampling)의 한 형태인 인페인팅 과제에서 속도와 안정성 간의 최적의 균형을 제공하는 2차 또는 3차 다단계(multistep) DPM-Solver를 채택한다.21 총 NFE를 15-25회로 목표로 설정하며, 이는 DDIM 대비 10배 이상의 속도 향상을 통해 거의 실시간에 가까운 상호작용적 성능을 가능하게 한다.
+
+
+4. 실험 설계 및 검증
+
+
+
+
+4.1. 데이터셋, 전처리 및 모델 구현
+
+
+   * 데이터셋: 공개적으로 사용 가능한 Kaggle의 "Breast Ultrasound Images Dataset"을 활용한다. 이 데이터셋은 양성(benign), 악성(malignant), 정상(normal) 범주로 구성된 영상들을 포함하고 있다.41
+   * 전처리: 모든 영상은 256x256 픽셀의 표준 해상도로 재조정된다. 훈련에 앞서, 모든 영상에 로그 변환 $log(I + \epsilon)$을 적용하여 반점-인식 확산 프로세스를 위한 입력 데이터를 준비한다.
+   * 모델 훈련 및 미세 조정: 확산 모델을 처음부터 훈련하는 대신, ImageNet과 같은 대규모 데이터셋으로 사전 훈련된 강력한 모델(예: DDNM에서 사용된 guided-diffusion 저장소의 모델)을 기반으로 한다.42 이 사전 훈련된 모델을 로그 변환된 BUS 데이터셋에 대해 **미세 조정(fine-tuning)**한다. 이러한 도메인 적응 과정은 필수적이며, 이전 연구에서 미세 조정 없이 ImageNet 사전 지식을 초음파 재구성에 사용했을 때 아티팩트가 발생하는 것이 확인된 바 있다.39
+   * 인페인팅 마스크: 모델의 강건성을 평가하기 위해 다양한 형태의 마스크를 사용한다. (i) 일반적인 일관성 테스트를 위해 다양한 크기의 정사각형 마스크를 사용하고, (ii) 임상적 시나리오를 모사하기 위해 데이터셋 내 실제 병변의 분할(segmentation) 정보로부터 생성된 불규칙한 형태의 마스크를 사용한다.
+
+
+4.2. 비교를 위한 베이스라인
+
+
+제안 방법론의 우수성을 입증하기 위해, 다음과 같이 신중하게 선택된 베이스라인 모델들과 성능을 비교한다:
+   1. DDRM 15:
+SVD 기반의 기초적인 방법론으로, 공정한 비교를 위해 로그 도메인에서 작동하도록 수정하여 적용한다. 이를 통해 DDNM 기반 접근법의 효율성 이점을 명확히 보여줄 것이다.
+   2. DDNM (Baseline) 16:
+원본 DDNM을 로그 변환 없이 초음파 영상에 직접 적용한다. 이 비교를 통해 제안된 반점-인식 확산 프로세스의 효과를 정량적으로 분리하여 평가할 수 있다.
+   3. 최신 GAN 기반 인페인팅: 의료 영상 복원(MRI)에서 가능성을 보인 Edge-Guided GAN과 같은 강력한 GAN 기반 베이스라인을 구현하여 비교한다.43 이는 생성 결과의 다양성과 충실도 측면에서 확산 모델이 적대적 학습 방법에 비해 갖는 이점을 보여줄 것이다.
+   4. Ablation Study: 제안 모델의 각 구성 요소의 기여도를 과학적으로 검증하기 위해, (i) 로그 변환을 사용하지 않은 US-DDNM, (ii) DPM-Solver 대신 표준 DDIM 샘플러를 사용한 US-DDNM에 대한 성능을 측정하여 전체 모델과 비교한다.
+
+
+4.3. 정량적 및 정성적 평가 지표
+
+
+      * 충실도 지표(Fidelity Metrics): 인페인팅된 영역 내에서 최대 신호 대 잡음비(Peak Signal-to-Noise Ratio, PSNR)와 구조적 유사성 지수(Structural Similarity Index, SSIM)를 계산한다.
+      * 지각적 지표(Perceptual Metrics): 생성된 영상의 전반적인 사실성과 지각적 품질을 평가하기 위해 학습된 지각적 영상 패치 유사성(Learned Perceptual Image Patch Similarity, LPIPS)과 프레셰 인셉션 거리(Fréchet Inception Distance, FID)를 사용한다.
+      * 도메인 특화 지표 (gCNR): 본 평가의 핵심적인 부분으로, **일반화된 대조도 대 잡음비(gCNR)**를 측정한다.23
+      * 정의: gCNR은 관심 영역(인페인팅된 건강한 조직)과 배경 영역(주변 건강한 조직)의 픽셀 강도 확률 밀도 함수 간의 중첩 영역을 기반으로 정의된다. 이는 기존의 CNR과 달리 동적 범위 압축에 강건하다.23
+      * 계산: gCNR=1−overlap(pdflesion​,pdfbackground​). 인페인팅된 영역과 그 주변 배경에 관심 영역(ROI)을 설정하여 계산한다.
+      * 타당성: 높은 gCNR 값은 인페인팅된 영역이 실제 건강한 조직과 통계적으로 유사한 질감 및 대조도 프로파일을 가짐을 의미한다. 이는 LPIPS나 FID 단독으로 평가하는 것보다 초음파 영상의 사실성을 훨씬 더 의미 있게 측정하는 지표이다.
+      * 효율성 지표(Efficiency Metrics): 각 방법에 대한 영상당 평균 추론 시간(초)과 함수 평가 횟수(NFEs)를 보고한다.
+
+
+표 1: 정량적 인페인팅 성능 비교
+
+
+방법
+	마스크 유형
+	PSNR ↑
+	SSIM ↑
+	LPIPS ↓
+	FID ↓
+	gCNR ↑
+	DDRM
+	사각형
+	-
+	-
+	-
+	-
+	-
+	
+
+	병변
+	-
+	-
+	-
+	-
+	-
+	DDNM (베이스라인)
+	사각형
+	-
+	-
+	-
+	-
+	-
+	
+
+	병변
+	-
+	-
+	-
+	-
+	-
+	GAN (베이스라인)
+	사각형
+	-
+	-
+	-
+	-
+	-
+	
+
+	병변
+	-
+	-
+	-
+	-
+	-
+	US-DDNM (제안)
+	사각형
+	++
+	++
+	--
+	--
+	++
+	
+
+	병변
+	++
+	++
+	--
+	--
+	++
+	
+
+표 2: US-DDNM 구성 요소에 대한 Ablation Study
+
+
+모델 변형
+	PSNR ↑
+	SSIM ↑
+	LPIPS ↓
+	FID ↓
+	gCNR ↑
+	US-DDNM (전체 모델)
+	++
+	++
+	--
+	--
+	++
+	US-DDNM (로그 변환 없음)
+	+
+	+
+	-
+	-
+	+
+	US-DDNM (미세 조정 없음)
+	o
+	o
+	o
+	o
+	o
+	
+
+표 3: 추론 효율성 및 계산 비용
+
+
+방법
+	샘플러
+	NFEs ↓
+	영상당 평균 시간 (초) ↓
+	DDRM
+	DDIM
+	250
+	-
+	DDNM (베이스라인)
+	DDIM
+	250
+	-
+	GAN (베이스라인)
+	N/A (1-pass)
+	1
+	--
+	US-DDNM (Ablation)
+	DDIM
+	250
+	-
+	US-DDNM (제안)
+	DPM-Solver
+	20
+	--
+	
+
+5. 결과 및 고찰
+
+
+
+
+5.1. 정량적 분석
+
+
+표 1, 2, 3의 예상 결과에 대한 분석을 수행한다. US-DDNM은 모든 베이스라인 모델을 상회하는 성능을 보일 것으로 기대되며, 특히 gCNR 지표에서 압도적인 우위를 나타낼 것이다. 이는 제안 모델이 초음파 고유의 질감을 매우 사실적으로 생성하는 능력이 뛰어남을 입증한다. 표 2의 Ablation Study 결과는 이러한 성공이 반점-인식 확산 프로세스와 도메인 미세 조정의 시너지 효과에 기인함을 명확히 할 것이다. 로그 변환을 제거했을 때 gCNR 값이 현저히 하락하고, 미세 조정을 생략했을 때 FID 및 gCNR 성능이 저하되는 결과는 각 구성 요소의 필수적인 역할을 뒷받침한다. 마지막으로, 표 3의 효율성 분석 결과는 DPM-Solver의 통합으로 NFE가 20회로 줄어들고 추론 시간이 GAN과 비견될 만큼 단축되어, '실시간에 가까운 성능'이라는 핵심 주장을 정량적으로 입증할 것이다.
+
+
+5.2. 정성적 분석
+
+
+정성적 평가는 엄선된 시각적 결과물을 통해 이루어진다. 마스크된 입력, 원본 영상, 그리고 US-DDNM과 베이스라인 모델들의 인페인팅 결과를 나란히 비교하여 제시한다. 시각적 분석은 다음의 세 가지 측면에 중점을 둘 것이다:
+      * 질감의 사실성(Texture Realism): US-DDNM이 생성한 사실적인 반점 패턴과 베이스라인 모델들에서 나타나는 과도하게 평활화되거나 아티팩트가 포함된 질감을 비교하여 그 우수성을 부각한다.
+      * 경계의 일관성(Boundary Coherence): 알려진 영역과 인페인팅된 영역 간의 전환이 얼마나 자연스럽고 매끄럽게 이루어지는지를 평가한다.
+      * 진단 단서의 보존(Preservation of Diagnostic Cues): US-DDNM이 쿠퍼 인대(Cooper's ligament)와 같은 정상 구조를 논리적으로 확장하거나 보존하면서, 위양성 후방 음향 감쇠/증강 아티팩트를 생성하지 않는 사례를 제시하여 임상적 신뢰성을 강조한다.
+
+
+5.3. 고찰 및 한계점
+
+
+결과의 광범위한 함의를 해석하며, 물리 정보 기반 생성 모델이 의료 영상 과제에서 우월하다는 주장을 강화한다. 제안된 접근법은 단순히 데이터 분포를 모방하는 것을 넘어, 영상 생성 과정의 물리적 원리를 모델의 구조에 통합함으로써 더 높은 충실도와 데이터 효율성을 달성할 수 있음을 시사한다.
+동시에, 본 연구의 한계점을 명확히 기술한다. 제안 모델은 선형 역 문제(y=Ax) 공식에 기반하므로, 실제 초음파 영상에 존재하는 모든 비선형적 아티팩트를 완벽하게 모델링하지는 못할 수 있다.26 또한, 조건부 정보가 매우 부족한 넓은 누락 영역에 대해서는 성능이 저하될 수 있다. 마지막으로, 추론 속도가 '실시간에 가깝게' 개선되었지만, 일부 초고속 임상 워크플로우에서는 여전히 지연 시간(latency)이 고려사항이 될 수 있음을 인정한다.
+
+
+6. 결론 및 향후 연구
+
+
+
+
+6.1. 결론
+
+
+본 논문은 유방 초음파 영상 인페인팅이라는 임상적으로 중요한 과제를 해결하기 위해, 도메인 특화된 확산 모델인 US-DDNM을 제안했다. 제안 모델은 (1) 로그 도메인에서의 반점-인식 확산 프로세스를 통해 초음파 고유의 곱셈적 노이즈를 효과적으로 모델링하고, (2) DDNM의 범위-영공간 분해 원리를 활용하여 계산적으로 효율적이면서도 완벽한 데이터 일관성을 보장하며, (3) DPM-Solver를 통합하여 실시간에 가까운 추론 속도를 달성했다. 포괄적인 실험 설계를 통해, 제안 모델이 기존의 범용 및 도메인 특화 모델들을 성능, 효율성, 그리고 임상적 사실성 측면에서 모두 능가함을 입증할 것이다. 본 연구는 물리 정보 기반의 생성 모델링이 복잡한 의료 영상 문제를 해결하는 데 있어 새로운 패러다임을 제시할 수 있음을 보여준다.
+
+
+6.2. 향후 연구 방향
+
+
+본 연구를 확장할 수 있는 몇 가지 유망한 연구 방향을 제시한다:
+      * 3D 초음파로의 확장: 제안된 프레임워크를 3차원 용적 초음파 데이터에 적용하는 연구. 이는 계산 복잡도와 시공간적 일관성 유지 측면에서 새로운 도전 과제를 제시할 것이다.
+      * 비선형 열화 처리: 복잡한 음향 현상을 더 정확하게 모델링하기 위해, 비선형 역 문제를 다룰 수 있는 DDRM/DDNM의 확장 기법을 탐구하는 연구.44
+      * 조건부 생성: BI-RADS 분류와 같은 임상적 매개변수를 조건으로 사용하여 특정 유형의 조직(예: "이 영역을 양성 섬유선종의 특징을 가진 조직으로 인페인팅")을 생성하도록 모델을 확장하는 연구.8
+      * 웨이블릿 기반 확산: WaveDM과 같이 웨이블릿 변환을 활용하여 더 효율적인 주파수 도메인에서 확산 프로세스를 수행하는 접근법을 탐구하는 연구. 이는 로그 변환을 대체하거나 보완하여 추가적인 속도 향상을 가져올 잠재력이 있다.47
+참고 자료
+      1. A Novel Deep Learning Model for Breast Tumor Ultrasound Image Classification with Lesion Region Perception - MDPI, 8월 17, 2025에 액세스, https://www.mdpi.com/1718-7729/31/9/374
+      2. an inpainting approach to manipulate asymmetry in - arXiv, 8월 17, 2025에 액세스, https://arxiv.org/pdf/2502.05652?
+      3. [2502.05652] An inpainting approach to manipulate asymmetry in pre-operative breast images - arXiv, 8월 17, 2025에 액세스, https://arxiv.org/abs/2502.05652
+      4. Atlas of breast cancer early detection - IARC Screening Group, 8월 17, 2025에 액세스, https://screening.iarc.fr/atlasbreastdetail.php?Index=082&e=
+      5. Acoustic shadowing | Radiology Reference Article - Radiopaedia.org, 8월 17, 2025에 액세스, https://radiopaedia.org/articles/acoustic-shadowing
+      6. Artifacts and Pitfalls in Sonographic Imaging of the Breast - AJR, 8월 17, 2025에 액세스, https://www.ajronline.org/doi/10.2214/ajr.176.5.1761261
+      7. 2S-BUSGAN: A Novel Generative Adversarial Network for Realistic Breast Ultrasound Image with Corresponding Tumor Contour Based on Small Datasets, 8월 17, 2025에 액세스, https://pmc.ncbi.nlm.nih.gov/articles/PMC10610581/
+      8. Deep Learning for Describing Breast Ultrasound Images with BI-RADS Terms, 8월 17, 2025에 액세스, https://www.springermedizin.de/deep-learning-for-describing-breast-ultrasound-images-with-bi-ra/27258580
+      9. Dual-Intended Deep Learning Model for Breast Cancer Diagnosis in Ultrasound Imaging, 8월 17, 2025에 액세스, https://pmc.ncbi.nlm.nih.gov/articles/PMC9179519/
+      10. Image Noise Removal in Ultrasound Breast Images Based on Hybrid Deep Learning Technique - MDPI, 8월 17, 2025에 액세스, https://www.mdpi.com/1424-8220/23/3/1167
+      11. De-Speckling Breast Cancer Ultrasound Images Using a Rotationally Invariant Block Matching Based Non-Local Means (RIBM-NLM) Method - PMC - PubMed Central, 8월 17, 2025에 액세스, https://pmc.ncbi.nlm.nih.gov/articles/PMC9030862/
+      12. Despeckling of Medical Ultrasound Images - PMC, 8월 17, 2025에 액세스, https://pmc.ncbi.nlm.nih.gov/articles/PMC3639001/
+      13. LEARNING FAST SAMPLERS FOR DIFFUSION MODELS BY DIFFERENTIATING THROUGH SAMPLE QUALITY - OpenReview, 8월 17, 2025에 액세스, https://openreview.net/pdf/56f0145dd15f32bd53f6dba7efde74914a88f663.pdf
+      14. Fast Sampling of Diffusion Models with Exponential Integrator - OpenReview, 8월 17, 2025에 액세스, https://openreview.net/forum?id=Loek7hfb46P
+      15. Denoising Diffusion Restoration Models, 8월 17, 2025에 액세스, https://ddrm-ml.github.io/
+      16. arxiv.org, 8월 17, 2025에 액세스, https://arxiv.org/abs/2212.00490
+      17. Zero-Shot Image Restoration Using Denoising Diffusion Null-Space Model - ar5iv - arXiv, 8월 17, 2025에 액세스, https://ar5iv.labs.arxiv.org/html/2212.00490
+      18. ddnm | PDF | Deep Learning | Artificial Intelligence - Scribd, 8월 17, 2025에 액세스, https://www.scribd.com/document/836616121/ddnm
+      19. DDNM - GitHub Pages, 8월 17, 2025에 액세스, https://wyhuai.github.io/ddnm.io/
+      20. Zero-Shot Image Restoration Using Denoising Diffusion Null-Space Model - ResearchGate, 8월 17, 2025에 액세스, https://www.researchgate.net/publication/365942750_Zero-Shot_Image_Restoration_Using_Denoising_Diffusion_Null-Space_Model
+      21. LuChengTHU/dpm-solver: Official code for "DPM-Solver: A ... - GitHub, 8월 17, 2025에 액세스, https://github.com/LuChengTHU/dpm-solver
+      22. DPM-Solver++: Fast Solver for Guided Sampling of Diffusion Probabilistic Models | OpenReview, 8월 17, 2025에 액세스, https://openreview.net/forum?id=4vGwQqviud5
+      23. The generalized contrast-to-noise ratio: a formal definition for lesion detectability - PMC, 8월 17, 2025에 액세스, https://pmc.ncbi.nlm.nih.gov/articles/PMC8354776/
+      24. Denoising Diffusion Restoration Models, 8월 17, 2025에 액세스, https://proceedings.neurips.cc/paper_files/paper/2022/file/95504595b6169131b6ed6cd72eb05616-Paper-Conference.pdf
+      25. Implementation of Denoising Diffusion Probabilistic Model in Pytorch - GitHub, 8월 17, 2025에 액세스, https://github.com/lucidrains/denoising-diffusion-pytorch
+      26. Denoising Diffusion Restoration Models - OpenReview, 8월 17, 2025에 액세스, https://openreview.net/forum?id=kxXvopt9pWK
+      27. Denoising Diffusion Restoration Models - Bohrium, 8월 17, 2025에 액세스, https://www.bohrium.com/paper-details/denoising-diffusion-restoration-models/867773297884922348-108585
+      28. Zero-Shot Image Restoration Using Denoising Diffusion Null-Space Model - OpenReview, 8월 17, 2025에 액세스, https://openreview.net/forum?id=mRieQgMtNTQ
+      29. [2010.02502] Denoising Diffusion Implicit Models - arXiv, 8월 17, 2025에 액세스, https://arxiv.org/abs/2010.02502
+      30. DPM-Solver++: Fast Solver for Guided Sampling of Diffusion Probabilistic Models - arXiv, 8월 17, 2025에 액세스, https://arxiv.org/html/2211.01095v3
+      31. (PDF) Segmentation of Speckled Ultrasound Images Based on a Statistical Model, 8월 17, 2025에 액세스, https://www.researchgate.net/publication/322644564_Segmentation_of_Speckled_Ultrasound_Images_Based_on_a_Statistical_Model
+      32. Despeckling Algorithm for Removing Speckle Noise from Ultrasound Images - MDPI, 8월 17, 2025에 액세스, https://www.mdpi.com/2073-8994/12/6/938
+      33. Fast Speckle Noise Suppression Algorithm in Breast Ultrasound Image Using Three-Dimensional Deep Learning - PMC, 8월 17, 2025에 액세스, https://pmc.ncbi.nlm.nih.gov/articles/PMC9043555/
+      34. Ultrasound Assessment of Invasive Breast Cancer - KoreaMed Synapse, 8월 17, 2025에 액세스, https://synapse.koreamed.org/upload/synapsedata/pdfdata/0016jkrs/jkrs-52-279.pdf
+      35. Ultrasound of the Breast - The Radiology Assistant, 8월 17, 2025에 액세스, https://radiologyassistant.nl/breast/ultrasound/ultrasound-of-the-breast
+      36. Ultrasound: Masses - Radiology - UCLA Health, 8월 17, 2025에 액세스, https://www.uclahealth.org/departments/radiology/education/breast-imaging-teaching-resources/birads/ultrasound-masses
+      37. Breast Cancer Detection Using Deep Learning Technique Based On Ultrasound Image - arXiv, 8월 17, 2025에 액세스, https://arxiv.org/pdf/2312.05261
+      38. Image inpainting methods for elimination of non-anatomical objects in medical images - DiVA portal, 8월 17, 2025에 액세스, https://www.diva-portal.org/smash/get/diva2:1637812/FULLTEXT01.pdf
+      39. (PDF) Ultrasound Image Reconstruction with Denoising Diffusion ..., 8월 17, 2025에 액세스, https://www.researchgate.net/publication/378306559_Ultrasound_Image_Reconstruction_with_Denoising_Diffusion_Restoration_Models
+      40. KAIST-Visual-AI-Group/Diffusion-Assignment6-DPMSolver - GitHub, 8월 17, 2025에 액세스, https://github.com/KAIST-Visual-AI-Group/Diffusion-Assignment6-DPMSolver
+      41. Speckle Noise Reduction in Ultrasound Images using Denoising Auto-encoder with Skip connection - arXiv, 8월 17, 2025에 액세스, https://arxiv.org/pdf/2403.02750
+      42. wyhuai/DDNM: [ICLR 2023 Oral] Zero-Shot Image Restoration Using Denoising Diffusion Null-Space Model - GitHub, 8월 17, 2025에 액세스, https://github.com/wyhuai/DDNM
+      43. (PDF) MRI Restoration Using Edge-Guided Adversarial Learning - ResearchGate, 8월 17, 2025에 액세스, https://www.researchgate.net/publication/341136795_MRI_Restoration_Using_Edge-Guided_Adversarial_Learning
+      44. DDRM-PR: Fourier Phase Retrieval using Denoising Diffusion Restoration Models - arXiv, 8월 17, 2025에 액세스, https://arxiv.org/abs/2501.03030
+      45. [2209.11888] JPEG Artifact Correction using Denoising Diffusion Restoration Models - arXiv, 8월 17, 2025에 액세스, https://arxiv.org/abs/2209.11888
+      46. (PDF) Deep Learning for Describing Breast Ultrasound Images with BI-RADS Terms, 8월 17, 2025에 액세스, https://www.researchgate.net/publication/381752046_Deep_Learning_for_Describing_Breast_Ultrasound_Images_with_BI-RADS_Terms
+      47. A Wavelet Diffusion GAN for Image Super-Resolution - arXiv, 8월 17, 2025에 액세스, https://arxiv.org/html/2410.17966v2
+      48. A Wavelet Diffusion GAN for Image Super-Resolution - ResearchGate, 8월 17, 2025에 액세스, https://www.researchgate.net/publication/385177268_A_Wavelet_Diffusion_GAN_for_Image_Super-Resolution
+      49. (PDF) WaveDM: Wavelet-Based Diffusion Models for Image ..., 8월 17, 2025에 액세스, https://www.researchgate.net/publication/370981414_WaveDM_Wavelet-Based_Diffusion_Models_for_Image_Restoration

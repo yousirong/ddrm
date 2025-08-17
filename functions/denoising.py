@@ -61,46 +61,78 @@ def efficient_generalized_steps(x, seq, model, b, H_funcs, y_0, sigma_0, etaB, e
             
             x0_t = (xt - et * (1 - at).sqrt()) / at.sqrt()
 
-            #variational inference conditioned on y
-            sigma = (1 - at).sqrt()[0, 0, 0, 0] / at.sqrt()[0, 0, 0, 0]
-            sigma_next = (1 - at_next).sqrt()[0, 0, 0, 0] / at_next.sqrt()[0, 0, 0, 0]
-            xt_mod = xt / at.sqrt()[0, 0, 0, 0]
-            V_t_x = H_funcs.Vt(xt_mod)
-            SVt_x = (V_t_x * Sigma)[:, :U_t_y.shape[1]]
-            V_t_x0 = H_funcs.Vt(x0_t)
-            SVt_x0 = (V_t_x0 * Sigma)[:, :U_t_y.shape[1]]
-
-            falses = torch.zeros(V_t_x0.shape[1] - singulars.shape[0], dtype=torch.bool, device=xt.device)
-            cond_before_lite = singulars * sigma_next > sigma_0
-            cond_after_lite = singulars * sigma_next < sigma_0
-            cond_before = torch.hstack((cond_before_lite, falses))
-            cond_after = torch.hstack((cond_after_lite, falses))
-
-            std_nextC = sigma_next * etaC
-            sigma_tilde_nextC = torch.sqrt(sigma_next ** 2 - std_nextC ** 2)
-
-            std_nextA = sigma_next * etaA
-            sigma_tilde_nextA = torch.sqrt(sigma_next**2 - std_nextA**2)
+            # DDNM correction
+            # Formula: x0_t_corrected = x0_t + H_pinv * (y_0 - H * x0_t)
+            x0_t_flat = x0_t.view(n, -1)
+            y_0_flat = y_0.view(n, -1)
             
-            diff_sigma_t_nextB = torch.sqrt(sigma_next ** 2 - sigma_0 ** 2 / singulars[cond_before_lite] ** 2 * (etaB ** 2))
-
-            #missing pixels
-            Vt_xt_mod_next = V_t_x0 + sigma_tilde_nextC * H_funcs.Vt(et) + std_nextC * torch.randn_like(V_t_x0)
-
-            #less noisy than y (after)
-            Vt_xt_mod_next[:, cond_after] = \
-                V_t_x0[:, cond_after] + sigma_tilde_nextA * ((U_t_y - SVt_x0) / sigma_0)[:, cond_after_lite] + std_nextA * torch.randn_like(V_t_x0[:, cond_after])
+            h_x0_t = H_funcs.H(x0_t_flat)
+            diff = y_0_flat - h_x0_t
+            correction = H_funcs.H_pinv(diff)
             
-            #noisier than y (before)
-            Vt_xt_mod_next[:, cond_before] = \
-                (Sig_inv_U_t_y[:, cond_before_lite] * etaB + (1 - etaB) * V_t_x0[:, cond_before] + diff_sigma_t_nextB * torch.randn_like(U_t_y)[:, cond_before_lite])
+            x0_t_corrected_flat = x0_t_flat + correction
+            x0_t_corrected = x0_t_corrected_flat.view_as(x0_t)
 
-            #aggregate all 3 cases and give next prediction
-            xt_mod_next = H_funcs.V(Vt_xt_mod_next)
-            xt_next = (at_next.sqrt()[0, 0, 0, 0] * xt_mod_next).view(*x.shape)
+            # Compute xt_next from x0_t_corrected and et using DDIM update rule
+            pred_dir = et # Direction pointing to x_t
+
+            # Simplified DDIM step (eta=0)
+            xt_next = at_next.sqrt() * x0_t_corrected + (1 - at_next).sqrt() * pred_dir
 
             x0_preds.append(x0_t.to('cpu'))
             xs.append(xt_next.to('cpu'))
 
+
+    return xs, x0_preds
+
+def ddnm_steps(x, seq, model, b, H_funcs, y_0, sigma_0, etaB, etaA, etaC, cls_fn=None, classes=None):
+    with torch.no_grad():
+        n = x.size(0)
+        seq_next = [-1] + list(seq[:-1])
+        x0_preds = []
+        xs = [x]
+
+        #iterate over the timesteps
+        for i, j in tqdm(zip(reversed(seq), reversed(seq_next))):
+            t = (torch.ones(n) * i).to(x.device)
+            next_t = (torch.ones(n) * j).to(x.device)
+            at = compute_alpha(b, t.long())
+            at_next = compute_alpha(b, next_t.long())
+            xt = xs[-1].to('cuda')
+
+            if cls_fn == None:
+                et = model(xt, t)
+            else:
+                et = model(xt, t, classes)
+                et = et[:, :3]
+                et = et - (1 - at).sqrt()[0,0,0,0] * cls_fn(x,t,classes)
+            
+            if et.size(1) == 6:
+                et = et[:, :3]
+
+            x0_t = (xt - et * (1 - at).sqrt()) / at.sqrt()
+
+            # Correct the prediction using the DDNM null-space projection
+            # This is the core of the Coherent-DDRM idea from the paper
+            # x0_corrected = x0_t + H_pinv * (y - H * x0_t)
+            x0_t_flat = x0_t.view(n, -1)
+            y_0_flat = y_0.view(n, -1)
+            
+            h_x0_t = H_funcs.H(x0_t_flat)
+            diff = y_0_flat - h_x0_t
+            correction = H_funcs.H_pinv(diff)
+            
+            x0_t_corrected_flat = x0_t_flat + correction
+            x0_t_corrected = x0_t_corrected_flat.view_as(x0_t)
+
+            # Compute the next step xt_next using the corrected x0_t
+            # This uses the DDIM update rule
+            pred_dir = et # Direction pointing to x_t from the model
+
+            # DDIM step (eta=0 for deterministic sampling)
+            xt_next = at_next.sqrt() * x0_t_corrected + (1 - at_next).sqrt() * pred_dir
+
+            x0_preds.append(x0_t)
+            xs.append(xt_next)
 
     return xs, x0_preds

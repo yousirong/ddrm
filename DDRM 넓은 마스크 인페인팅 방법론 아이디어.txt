@@ -1,0 +1,313 @@
+﻿Denoising Diffusion Restoration Model의 대규모 마스크 인페인팅 성능 향상을 위한 방법론: 종합적 분석 및 미래 전망
+
+
+
+
+I. DDRM의 근본적 한계와 비일관성 문제 분석
+
+
+Denoising Diffusion Restoration Models (DDRM)은 사전 훈련된 생성 모델을 활용하여 별도의 재훈련 없이 다양한 이미지 복원 문제를 해결하는 획기적인 프레임워크로 제안되었다.1 그러나 이미지 인페인팅(Inpainting) 작업, 특히 손실 영역이 넓은 대규모 마스크(large mask)를 처리할 때 DDRM은 구조적, 의미적 비일관성이라는 명백한 한계를 드러낸다. 이 한계는 모델의 사소한 결함이 아니라, 그 수학적 공식화에서 비롯된 필연적인 결과이다. 따라서 효과적인 개선 방안을 모색하기 위해서는 먼저 DDRM의 작동 원리와 실패 메커니즘을 심층적으로 분석해야 한다.
+
+
+1.1. 비지도 후방 확률 샘플링으로서의 DDRM 프레임워크
+
+
+DDRM의 핵심 원리는 임의의 선형 역 문제(linear inverse problem)를 해결하는 데 있다. 선형 역 문제는 관측 모델 $y = Hx + z$로 표현될 수 있으며, 여기서 $x$는 원본 이미지, $H$는 열화 연산자(degradation operator), $y$는 관측된 이미지, $z$는 노이즈를 의미한다.3 DDRM은 이 문제를 주어진 관측값
+$y$에 대한 원본 이미지 $x$의 후방 확률 분포 $p(x|y)$로부터 샘플링하는 방식으로 접근한다.1
+이 접근법의 가장 큰 특징은 변분 추론(variational inference)에 기반하여, 사전 훈련된 비조건부(unconditional) 노이즈 제거 확산 모델(Denoising Diffusion Probabilistic Model, DDPM)을 강력한 이미지 사전 확률(prior) $p(x)$로 활용한다는 점이다.1 이로 인해 특정 복원 작업에 대한 재훈련이나 네트워크 수정 없이도 초고해상도(super-resolution), 컬러 복원(colorization), 인페인팅, 압축 센싱(compressed sensing), 디블러링(deblurring) 등 광범위한 문제에 적용할 수 있는 제로샷(zero-shot) 또는 비지도(unsupervised) 학습이 가능해진다.2
+이 과정은 베이즈 정리 $p(x|y) \propto p(x)p(y|x)$에 근거한다. 여기서 사전 확률 $p(x)$는 DDPM이 학습한 자연 이미지의 분포를 나타내며, 생성된 이미지가 얼마나 '사실적인가(realness)'를 결정한다. 우도(likelihood) $p(y|x)$는 생성된 이미지 $x$가 주어진 관측값 $y$와 얼마나 일치하는지를 나타내는 데이터 일관성(data consistency) 항이다. DDRM은 이 두 가지 요소를 모두 만족시키는 이미지를 생성하는 것을 목표로 한다.
+
+
+1.2. 인페인팅 공식화와 비일관성의 근원
+
+
+이미지 인페인팅 작업에서 열화 연산자 $H$는 마스크를 나타내는 대각 행렬로 정의된다. 마스크 외부의 알려진 픽셀(unmasked region)에 해당하는 대각 원소는 1, 마스크 내부의 손실된 픽셀(masked region)에 해당하는 대각 원소는 0이다. 따라서 관측값 $y$는 마스크 외부의 원본 픽셀 값을 의미한다.
+DDRM이 데이터 일관성을 강제하는 방식은 매우 직설적이다. 각 노이즈 제거 단계(denoising step)에서 생성되는 중간 결과물 $x_t$에 대해, 마스크 외부의 알려진 영역을 원본 이미지의 해당 영역 $y$에 적절한 노이즈를 추가한 버전으로 강제 교체하거나 혼합(blending)한다.6 이 단순한 교체 연산이 바로 DDRM의 근본적인 실패 원인이 된다.
+이 방식은 마스크 외부 영역의 픽셀 값만 강제할 뿐, 마스크 내부 영역의 픽셀 생성에는 직접적인 제약을 가하지 못한다. 결과적으로 마스크 내부 영역은 거의 전적으로 비조건부 사전 확률 $p(x)$에 의존하여 생성되는데, 이 과정에서 마스크 외부 영역 $y$가 제공하는 문맥 정보와의 *일관성(coherence)*을 강제할 명시적인 메커니즘이 부재한다.6
+이러한 문제점은 실제 결과물에서 명확하게 관찰된다. 예를 들어, 인물의 절반을 가린 마스크를 인페인팅할 때, 생성된 영역과 원본 영역의 머리 색깔이나 스타일, 피부 톤이 달라 경계면에서 뚜렷한 불연속성이 발생하는 현상이 보고되었다.6 마스크의 크기가 커질수록 이 문제는 치명적으로 작용한다. 생성 모델이 의존해야 할 문맥 정보가 줄어들면서, 사전 확률에 기반한 생성 결과가 실제 문맥과 동떨어질 가능성이 기하급수적으로 증가하기 때문이다.
+결론적으로, DDRM의 비일관성 문제는 확산 모델의 사전 확률 생성 능력 부족이 아니라, 우도 항 $p(y|x)$를 구현하는 방식의 근본적인 한계에서 비롯된다. 모델은 사전 확률 $p(x)$와 우도 $p(y|x)$를 거의 독립적인 두 목표로 취급하도록 설계되었으며, 이 두 목표가 지배하는 영역 간의 의미론적, 구조적 조화를 강제하는 항이 없다. 대규모 마스크가 주어지면, 넓은 영역이 오직 $p(x)$에 의해서만 생성된다. 모델은 이 영역에 매우 사실적이지만 문맥적으로는 완전히 틀린 이미지를 생성하고도 주어진 목표 함수를 만족시킬 수 있다. 우리가 관찰하는 비일관성은 바로 이러한 문맥적 일관성을 강제할 메커니즘 없이 모델이 자신의 목표를 충실히 이행한 결과인 것이다.
+
+
+1.3. 비교 분석: DDRM 대(vs.) 대안적 비지도 방법
+
+
+DDRM의 한계를 이해하기 위해, 동일한 문제를 다른 방식으로 접근하는 대안적 비지도 인페인팅 방법들과 비교하는 것이 유용하다.
+* RePaint: RePaint는 데이터 일관성을 위해 다른 전략을 사용한다.7 이 방법은 역확산 과정에서 반복적인 리샘플링(resampling) 또는 "시간 여행(time travel)" 스케줄을 도입한다. 즉, 노이즈를 제거하는 단계와 다시 노이즈를 추가하는 단계를 반복함으로써, 생성되는 영역과 알려진 영역의 정보가 서로 섞이고 조화를 이룰 기회를 여러 번 제공한다. 이는 DDRM의 단일 패스 방식보다 계산 비용이 높지만, 경험적으로 경계면의 조화를 개선하는 효과가 있다.
+* DDNM (Denoising Diffusion Null-Space Model): DDNM은 더욱 수학적으로 원칙에 입각한 접근법을 제시한다.5 선형 역 문제
+$y = Hx$에서 관측값 $y$는 전적으로 $x$의 영공간(range-space) 성분에 의해 결정되며, 영공간에 직교하는 영공간(null-space) 성분은 $y$에 아무런 영향을 미치지 않는다는 원리를 이용한다. DDNM은 매 스텝에서 데이터 일관성을 강제하기 위해 오직 영공간 성분만을 수정한다. 이를 통해 원본 픽셀을 그대로 유지하면서도 인공적인 경계면 아티팩트 발생을 이론적으로 방지한다.
+이러한 비교를 통해 DDRM의 실패는 결국 단순성과 속도를 위해 정교한 일관성 유지 메커니즘을 희생한 트레이드오프의 결과임을 알 수 있다. DDNM과 RePaint는 각각 다른 방식으로 이 문제를 해결하려 시도하며, 이는 더 나은 대규모 마스크 인페인팅 모델을 설계하는 데 중요한 시사점을 제공한다. 이는 모든 제로샷 역 문제 해결기가 직면하는 근본적인 딜레마, 즉 데이터 충실도(관측값 $y와의 일치)와 생성 사전 확률의 무결성('사실성') 사이의 긴장 관계를 보여준다. 단순한 혼합 방식은 사전 확률의 출력을 손상시키고, 순수한 생성 방식은 데이터 제약에서 벗어날 수 있다. 따라서 가장 성공적인 방법은 이 두 힘을 정교하게 융합하는 메커니즘을 필요로 할 것이다.
+
+
+방법론
+	핵심 원리
+	데이터 일관성 메커니즘
+	강점
+	대규모 마스크에서의 주요 한계
+	DDRM
+	비지도 후방 확률 샘플링
+	알려진 영역의 노이즈 버전을 중간 결과물에 강제 교체/혼합 6
+	빠르고, 범용적이며, 별도 훈련이 필요 없음 1
+	생성 영역과 원본 영역 간의 심각한 의미적/구조적 비일관성 발생 6
+	RePaint
+	반복적 리샘플링을 통한 조화
+	알려진 영역과 생성된 영역을 반복적으로 노이즈 추가/제거하며 결합 7
+	경험적으로 경계면의 조화를 개선하고 다양한 결과 생성 가능
+	계산 비용이 매우 높고, 완전한 일관성을 보장하지는 못함
+	DDNM
+	영공간(Null-Space) 투영
+	각 단계에서 영공간 성분만을 수정하여 데이터 제약을 만족시킴 5
+	수학적으로 정밀하며 경계면 아티팩트가 거의 없음
+	선형 문제에 국한되며, SVD 계산 등으로 인해 복잡하고 느릴 수 있음
+	
+
+II. 전역적 문맥과 장거리 의존성 강화
+
+
+DDRM의 인페인팅 실패는 알고리즘적 한계일 뿐만 아니라, 근본적으로는 아키텍처의 한계이기도 하다. 대부분의 초기 확산 모델에서 사용된 U-Net 백본(backbone)은 멀리 떨어진 픽셀 간의 관계를 효과적으로 모델링하는 데 제약이 있으며, 이는 대규모 마스크 인페인팅에서 치명적인 약점으로 작용한다. 마스크의 한쪽 끝에 있는 정보가 반대편 끝의 생성 과정에 영향을 미치지 못한다면, 전역적으로 일관된 구조를 생성하는 것은 원천적으로 불가능하다.
+
+
+2.1. CNN 기반 아키텍처의 수용장(Receptive Field) 병목 현상
+
+
+DDRM을 포함한 표준적인 확산 모델들은 U-Net 아키텍처를 기반으로 하며, 이는 합성곱 신경망(Convolutional Neural Networks, CNNs)으로 구성된다.9 CNN의 본질적인 특징은 지역적 귀납 편향(local inductive bias)이다. 즉, 인접한 픽셀들 간의 관계를 통해 지역적인 텍스처나 패턴을 포착하는 데는 매우 뛰어나지만, 이미지 전체에 걸친 장거리 의존성(long-range dependencies)을 모델링하는 데는 구조적인 어려움을 겪는다.10
+이론적으로 심층 CNN의 수용장(receptive field)은 이미지 전체를 덮을 수 있지만, 실제 유효 수용장(effective receptive field)은 가우시안 분포와 같이 중앙으로 크게 편향되어 있어, 멀리 떨어진 픽셀의 정보는 미미한 영향만을 미친다.12 대규모 마스크 인페인팅의 경우, 이는 마스크 경계 근처의 정보가 마스크 중앙부의 구조 생성에 거의 기여하지 못함을 의미한다. 따라서, 샘플링이나 데이터 일관성 기법을 아무리 정교하게 개선하더라도, 아키텍처 자체가 마스크를 가로질러 정보를 효과적으로 전파할 수 없다면 완전한 성공을 거둘 수 없다. 이는 아키텍처의 근본적인 변화가 단순한 개선이 아닌, 문제 해결의 전제 조건임을 시사한다.
+
+
+2.2. 패러다임 1: 전역적 수용장을 위한 고속 푸리에 변환 합성곱 (FFC)
+
+
+이러한 수용장 문제를 해결하기 위한 선구적인 접근법 중 하나는 GAN 기반 인페인팅 모델인 LaMa에서 제시되었다.13 LaMa는 표준적인 합성곱을 고속 푸리에 변환 합성곱(Fast Fourier Convolutions, FFC)으로 대체한다.
+FFC의 핵심 메커니즘은 공간 영역(spatial domain)이 아닌 주파수 영역(frequency domain)에서 연산을 수행하는 것이다.14 푸리에 변환을 통해 이미지를 주파수 성분으로 분해하면, 각 주파수 성분은 이미지 전체의 전역적 정보를 담게 된다. 따라서 단일 FFC 레이어는 이미지 전체를 포괄하는 수용장을 가지게 되며, 이를 통해 모델은 초기 레이어부터 전역적인 문맥과 주기적인 구조를 효과적으로 포착할 수 있다.12
+LaMa 연구의 중요한 발견은 FFC 아키텍처의 잠재력을 최대한 발휘하기 위해서는 세 가지 요소가 함께 필요하다는 것이다: (1) FFC 아키텍처, (2) 높은 수용장을 가진 지각적 손실(High Receptive Field Perceptual Loss), (3) 훈련 시 공격적으로 생성된 대규모 마스크.12 이 세 요소의 조합을 통해 LaMa는 기존 CNN 기반 모델들을 압도하는 성능을 보여주었다.
+그러나 후속 연구들은 순수한 FFC에도 근본적인 결함이 있음을 지적했다.16 특히 인페인팅 작업에서 FFC는 스펙트럼 이동(spectrum shifting)이나 예기치 않은 공간적 활성화(unexpected spatial activation)와 같은 문제를 일으켜 색상 편향이나 아티팩트를 유발할 수 있다. 이는 전역적 수용장이라는 개념 자체는 올바르지만, FFC라는 특정 구현 방식이 최종적인 해결책이 아닐 수 있음을 시사한다.
+
+
+2.3. 패러다임 2: 원칙에 입각한 장거리 의존성 모델링을 위한 트랜스포머
+
+
+장거리 의존성 모델링을 위한 가장 강력하고 원칙적인 아키텍처는 트랜스포머(Transformer)이다. 트랜스포머는 자연어 처리에서 시작되었지만, 셀프 어텐션(self-attention) 메커니즘을 통해 컴퓨터 비전 분야에서도 혁명을 일으켰다.19 셀프 어텐션은 이미지의 모든 패치(토큰)가 다른 모든 패치와 직접적으로 상호작용할 수 있게 하여, 픽셀 간의 거리에 구애받지 않는 완전 연결된 의존성 그래프를 형성한다.9
+
+
+2.3.1. 사례 연구 1: Mask-Aware Transformer (MAT)
+
+
+MAT는 대규모 홀(hole) 인페인팅을 위해 특별히 설계된 트랜스포머 모델이다.21 MAT의 핵심 혁신은 '다중 헤드 문맥적 어텐션(multi-head contextual attention)'과 동적 마스크(dynamic mask)에 있다. 이 메커니즘은 모델이 어텐션을 계산할 때 초기에 마스크 외부의 유효한(valid) 토큰만을 사용하도록 강제한다. 그리고 점진적으로 정보를 마스크 내부 영역으로 전파시킨다. 이는 대규모 마스크 상황에서 문맥 정보를 효율적이고 명시적으로 활용하기 위한 매우 정교한 전략이다. MAT는 이를 통해 고해상도 이미지에서도 효율적으로 장거리 상호작용을 모델링한다.
+
+
+2.3.2. 사례 연구 2: Diffusion Transformers (DiT)
+
+
+DiT는 확산 모델의 U-Net 백본 전체를 트랜스포머로 대체하는 과감한 아키텍처 변화를 제안했다.9 이 연구는 CNN의 지역적 귀납 편향이 확산 모델의 효과적인 성능에 필수적이지 않으며, 순수한 트랜스포머 아키텍처만으로도, 특히 대규모 모델에서, 최첨단 생성 품질을 달성할 수 있음을 입증했다. DiT는 수용장 문제를 해결하기 위한 가장 직접적이고 강력한 아키텍처적 해법을 제시한다.
+FFC와 트랜스포머는 전역적 수용장을 달성하기 위한 두 가지 다른 철학을 대표한다. FFC는 푸리에 변환이라는 강력하고 구조화된 수학적 사전 지식을 부과한다. 이는 주기적인 텍스처 복원에는 탁월하지만, 복잡하고 비주기적인 의미 구조를 다루기에는 경직되어 아티팩트를 유발할 수 있다. 반면, 트랜스포머는 각 입력에 대해 의존성의 '기저(basis)'를 데이터로부터 유연하게 학습한다. 이는 더 강력하고 일반적이지만, 더 많은 계산량과 데이터를 요구할 수 있다. 의미론적 이해가 무엇보다 중요한 인페인팅 작업에서는, 유연하고 강력한 트랜스포머 기반 접근법이 더 유망해 보인다.
+
+
+아키텍처
+	핵심 메커니즘
+	수용장(Receptive Field)
+	강점
+	약점
+	대표 모델
+	표준 CNN (U-Net)
+	지역적 합성곱의 반복적 적용
+	지역적이며, 깊이에 따라 점진적으로 증가하지만 중앙 편향적 12
+	지역적 텍스처 및 패턴 포착에 효율적, 계산적으로 가벼움
+	장거리 의존성 모델링에 취약, 대규모 마스크에서 전역적 문맥 파악 실패 10
+	DDPM, DDRM
+	FFC 기반 네트워크
+	주파수 영역에서의 합성곱
+	이미지 전체 (Image-wide) 13
+	주기적 구조 및 전역적 패턴을 효율적으로 포착, 고해상도로의 일반화 능력 14
+	스펙트럼 이동, 색상 편향 등 아티팩트 발생 가능, 비주기적 구조에 취약 16
+	LaMa
+	트랜스포머 기반 네트워크
+	셀프 어텐션을 통한 모든 토큰 간의 상호작용
+	이미지 전체, 동적으로 학습됨
+	장거리 의존성 및 복잡한 의미론적 관계 모델링에 매우 강력, 유연성 19
+	계산 복잡도가 높고, 대규모 데이터셋과 컴퓨팅 자원을 요구함 11
+	MAT, DiT
+	
+
+III. 계층적 생성 및 명시적 가이던스 전략
+
+
+대규모 마스크 인페인팅의 어려움은 일관된 상위 구조(global structure)와 그럴듯한 하위 텍스처(local texture)를 동시에 생성해야 한다는 점에서 비롯된다. 단일 모델에게 이 복합적인 과제를 한 번에 해결하도록 요구하는 대신, 문제를 더 관리하기 쉬운 단계로 분해하거나 모델에 명시적인 중간 가이던스를 제공하는 전략이 효과적일 수 있다.
+
+
+3.1. Coarse-to-Fine 및 계층적 파이프라인
+
+
+계층적 접근법의 핵심 개념은 생성 과정을 분리하는 것이다.23 먼저 전체적인 구조와 의미를 설정한 후, 세부적인 텍스처를 채워 넣는 방식이다.
+일반적인 Coarse-to-Fine(개략-정밀) 파이프라인은 다음과 같이 구성된다:
+   1. 1단계 (Coarse Generation): 첫 번째 모델이 손실 영역에 대한 저해상도 버전 또는 구조적으로 단순화된 버전을 생성한다. 이 단계는 세부 묘사보다는 전역적인 레이아웃, 객체의 형태, 의미론적 배치를 설정하는 데 집중한다.
+   2. 2단계 (Fine Refinement): 두 번째 모델이 1단계의 개략적인 출력과 원본 이미지의 문맥을 입력으로 받아, 고주파 디테일과 텍스처를 추가하고 경계면을 매끄럽게 다듬는 '업샘플링' 역할을 수행한다.
+이러한 접근법의 대표적인 예시는 '뇌 MRI 인페인팅을 위한 계층적 확산 프레임워크'에서 찾아볼 수 있다.23 이 연구는 복잡한 3D 인페인팅 문제를 두 개의 직교하는 2D 확산 프로세스(축상면(axial) 인페인팅 후 관상면(coronal) 정제)로 분해했다. 첫 단계에서 전역적 일관성을 확보하고, 두 번째 단계에서 해부학적 세부 사항을 복원함으로써, 데이터 효율성을 유지하면서도 3D 공간에서의 일관성을 효과적으로 달성했다. 이는 복잡한 생성 과제를 분해하는 전략의 강력함을 보여준다.
+
+
+3.2. 명시적 구조적 가이던스
+
+
+Coarse-to-Fine 접근법의 'Coarse' 단계를 더욱 명시적이고 제어 가능하게 만들 수 있다. 이는 생성 과정을 구조적 사전 정보(structural prior)로 안내하는 방식이다.
+   * 방법론: Structure-Guided Diffusion Model (SGDM): SGDM은 이 개념을 구체화한 모델이다.26 이 모델은 두 단계의 계단식(cascaded) 확산 프로세스로 구성된다:
+   1. 구조 생성기 (Structure Generator): 첫 번째 확산 모델은 손실된 영역에 대한 그럴듯한 *에지 맵(edge map)*을 생성하도록 훈련된다.
+   2. 텍스처 생성기 (Texture Generator): 두 번째 확산 모델은 이렇게 생성된 에지 맵을 조건으로 입력받아 최종적인 텍스처 이미지를 합성한다.
+이 접근법39은 모델이 의미 없이 임의의 형태를 상상해내는 것을 방지하고 강력한 구조적 제약을 제공한다. 에지 맵은 텍스처 합성을 위한 일종의 '청사진' 역할을 하여, 최종 결과물의 구조적 무결성을 크게 향상시킨다.
+
+
+3.3. 명시적 의미론적 가이던스
+
+
+가이던스의 개념은 에지와 같은 저수준 구조에서 객체 클래스나 속성과 같은 고수준 의미론으로 확장될 수 있다.
+   * 방법론: GuidPaint: GuidPaint 프레임워크는 사전 훈련된 분류기(classifier)를 사용하여 훈련 없이 인페인팅 과정을 안내하는 방법을 제안한다.27 각 노이즈 제거 단계에서, 현재의 노이즈 이미지
+$x_t$에 대한 분류기의 예측 확률을 계산하고, 특정 목표 클래스에 대한 확률을 높이는 방향으로의 그래디언트(gradient)를 구한다. 이 그래디언트를 이용해 $x_t$를 미세하게 조정함으로써, 확산 모델의 재훈련 없이도 생성되는 콘텐츠가 원하는 의미론적 레이블과 일치하도록 '조종(steer)'할 수 있다.
+   * 방법론: 텍스트 기반 가이던스: 더 나아가, 텍스트 프롬프트를 가이던스로 사용하는 것이 가장 높은 수준의 제어 가능성을 제공한다.29 Stable Diffusion과 같은 모델들은 마스크된 이미지와 함께 '무엇을 채워 넣을지'에 대한 텍스트 설명을 조건으로 받아 인페인팅을 수행한다. 이는 사용자가 생성 결과물의 의미를 직접적으로 제어할 수 있게 해준다.
+이러한 가이던스 기반 방법들은 인페인팅 문제를 근본적으로 재구성한다. "문맥을 바탕으로 이 자리에 어떤 픽셀이 와야 하는가?"라는 막연한 질문 대신, "주어진 구조적/의미론적 계획을 이 문맥 안에서 사실적으로 렌더링하라"는 훨씬 더 제약이 많고 잘 정의된 문제를 제시한다. 이는 대규모 마스크 인페인팅의 본질적인 불확실성을 크게 줄여, 일관된 콘텐츠를 생성할 가능성을 극적으로 높이는 핵심 전략이다.
+더 나아가, 계층적 생성과 명시적 가이던스 사이에는 강력한 시너지 효과가 존재한다. 'Coarse' 또는 'Structure' 생성 단계의 중간 결과물은 사용자의 상호작용과 제어를 위한 완벽한 지점을 제공한다. 예를 들어, 시스템이 여러 개의 그럴듯한 에지 맵(구조)을 생성하고, 사용자가 그중 하나를 선택하거나 직접 편집한 후, 텍스처 생성 단계로 넘어가게 할 수 있다. 이는 인페인팅을 완전 자동화된 프로세스에서 사용자와 협력하는 제어 가능한 편집 도구로 전환시키는 잠재력을 가진다.
+
+
+IV. 고급 샘플링 및 원칙에 입각한 데이터 일관성
+
+
+아키텍처와 생성 프로세스의 한계를 논의한 후, 이제 확산 과정 자체의 핵심 메커니즘으로 돌아가 본다. DDRM의 단순한 혼합 방식을 넘어서, 각 단계에서 데이터 일관성을 강제하는 더 정교하고 원칙적인 방법들을 탐구하는 것은 필수적이다.
+
+
+4.1. 리샘플링을 통한 반복적 조화
+
+
+      * 방법론: RePaint: RePaint는 데이터 일관성을 확보하기 위해 반복적인 조화 과정을 제안한다.7 그 핵심 루프는 다음과 같다:
+      1. 노이즈 제거 (Denoise): 한 단계의 역확산 과정을 수행하여 미지의 영역에 콘텐츠를 생성한다.
+      2. 노이즈 추가 (Noise): 알려진 영역의 원본 픽셀에 현재 타임스텝 $t$에 해당하는 양의 노이즈를 추가한다.
+      3. 결합 (Join): 1단계에서 생성된 미지 영역과 2단계에서 노이즈가 추가된 알려진 영역을 합친다.
+      4. 리샘플링 (Resample): 결정적으로, 다시 노이즈를 추가하여 타임스텝을 $t-1$에서 $t$ 또는 그 이후로 되돌리는 '순방향' 단계를 수행한다.
+이 '시간 여행'과 같은 리샘플링 과정은 모델이 자신의 결정을 재평가하고, 알려진 영역과 생성된 영역 사이의 정보를 여러 번 교환하게 함으로써 경계면의 조화를 점진적으로 개선한다. 이는 DDRM의 단일 패스 접근법과 대조된다. RePaint는 계산 효율성을 희생하는 대신, 샘플링 과정 전반에 걸쳐 정보가 양방향으로 흐르도록 허용함으로써 향상된 일관성을 얻는다.
+
+
+4.2. 영공간 투영을 통한 원칙적 강제
+
+
+      * 방법론: DDNM: Denoising Diffusion Null-Space Model은 수학적으로 더욱 엄밀한 데이터 일관성 강제 방법을 제시한다.5
+      * 선형 역 문제 $y = Hx$에서, 관측값 $y$는 전적으로 $x$의 치역 공간(range-space) 성분에 의해 결정된다. 반면, 영공간(null-space) 성분은 $y$에 아무런 영향을 미치지 않는다.
+      * DDNM의 핵심 아이디어는 각 노이즈 제거 단계에서 먼저 표준적인 비조건부 예측 $x_0\_hat$을 얻은 다음, 이 예측값의 영공간 성분만을 수정하여 관측값 $y$와 일치하도록 투영하는 것이다. 근사적인 업데이트 규칙은 다음과 같다:
+$$x_{0\_final} = x_{0\_hat} + H_{pseudo\_inv} \cdot (y - H \cdot x_{0\_hat})$$
+여기서 $H_{pseudo\_inv}$는 $H$의 유사 역행렬(pseudo-inverse)이다.
+      * 이 방법은 각 단계에서 수학적으로 정확한 단일 샷(one-shot) 보정을 수행하여, $H \cdot x_{0\_final} = y$를 보장한다. 이는 DDRM의 조잡한 교체 방식이 유발하는 경계면 아티팩트 없이 데이터 일관성을 달성하는 매우 원칙적인 방법이다.
+RePaint와 DDNM은 데이터 일관성을 달성하기 위한 두 가지 근본적으로 다른 철학을 보여준다. RePaint는 경험적 조화(empirical harmonization) 프로세스이다. 즉, 리샘플링을 통해 충분한 기회를 주면 노이즈 제거기(denoiser)가 결국 불일치를 매끄럽게 만들 것이라고 가정하는, 마치 예술가가 반복적으로 캔버스 전체를 보며 미세 조정을 하는 것과 같은 반복적이고 발견적인 접근법이다. 반면, DDNM은 수학적 제약 만족(mathematical constraint satisfaction) 프로세스이다. 즉, 선형대수학을 이용해 각 단계에서 완벽한 해를 강제하는, 마치 엔지니어가 정밀한 공식을 사용해 부품을 완벽하게 맞추는 것과 같은 분석적이고 직접적인 접근법이다. 전자는 비선형적 상호작용에 더 강건할 수 있지만, 후자는 선형 문제에 대해 더 효율적이고 정확하다.
+
+
+4.3. 하이브리드 및 영역 인식 샘플링
+
+
+         * 방법론: Region-Aware Diffusion (RAD): RAD 모델은 이미지의 다른 영역이 서로 다른 속도로 노이즈 제거될 수 있다는 '비동기적 생성(asynchronous generation)' 개념을 도입한다.31
+         * RAD는 각 픽셀이 고유한 노이즈 스케줄을 가질 수 있도록 확산 모델을 재구성한다.
+         * 인페인팅 작업에 이를 적용하면, 알려진 영역은 사실상 타임스텝 $t=0$으로 즉시 도달하는 스케줄을 갖고, 마스크된 영역만 전체 타임스텝 $T$에서 $0$으로 진행되는 스케줄을 따르게 된다.
+         * 이러한 방식은 모델이 인페인팅 작업에 본질적으로 더 적합하게 훈련될 수 있게 하며, RePaint와 같은 복잡한 리샘플링 단계 없이도 더 빠른 추론을 가능하게 한다. 이는 문제의 비동기적 특성을 확산 과정 자체에 내재화시키는 접근법이다.
+최적의 해결책은 아마도 이러한 접근법들을 결합한 하이브리드 방식에 있을 것이다. DDNM 방식의 투영을 사용하여 주요 데이터 일관성을 효율적이고 아티팩트 없이 강제한 후, 소수의 RePaint 방식 리샘플링 단계를 추가하여 모델이 최종적인 전역적 조화를 이루도록 할 수 있다. 이는 투영만으로는 해결되지 않는 미묘한 비선형 효과나 불일치를 바로잡는 역할을 할 것이다. RAD 모델의 아이디어는 더 나아가, 확산 과정 자체를 인페인팅 작업에 맞게 조정함으로써 사후 보정의 필요성을 근본적으로 줄일 수 있는 가능성을 제시한다.
+
+
+V. 종합: 'Coherent-DDRM' 프레임워크 제안
+
+
+지금까지의 분석은 DDRM이 대규모 마스크 인페인팅에 실패하는 이유가 (1) 아키텍처의 전역적 문맥 이해 부족, (2) 단일 단계 생성의 복잡성, (3) 데이터 일관성 강제 방식의 조잡함이라는 세 가지 축에 있음을 보여준다. 본 섹션에서는 이러한 분석을 종합하여, 각 문제를 해결하기 위한 최신 방법론들을 결합한 새로운 통합 프레임워크인 'Coherent-DDRM'을 제안한다.
+
+
+5.1. 프레임워크 개요: 'Coherent-DDRM' 청사진
+
+
+Coherent-DDRM의 목표는 트랜스포머의 전역적 문맥 인식 능력, 가이드된 계층적 생성의 제어 가능성, 그리고 영공간 투영의 원칙에 입각한 데이터 일관성을 결합하여 대규모 마스크 인페인팅 문제를 정면으로 해결하는 것이다. 이 프레임워크의 강점은 인페인팅의 각기 다른 도전 과제를 분리하여 전문화된 모듈에 할당하는 데 있다. 이는 단일 모델에 과도한 부담을 주는 대신, 모듈식 설계를 통해 전체 시스템의 견고성과 제어 가능성을 높인다.
+
+
+5.2. 구성 요소 1: 트랜스포머 기반 백본
+
+
+Coherent-DDRM의 기초는 표준 U-Net을 대체하는 Diffusion Transformer (DiT) 아키텍처이다.9 이는 II장에서 분석한 핵심적인 아키텍처 결함, 즉 장거리 의존성 모델링 능력의 부재를 직접적으로 해결한다. DiT 백본은 셀프 어텐션을 통해 마스크의 양 끝에 있는 정보를 효과적으로 연결하여 전역적으로 일관된 구조를 생성할 수 있는 기반을 마련한다. 추가적으로, MAT에서 제안된 동적 마스크 어텐션 21을 어텐션 레이어에 통합하여, 알려진 영역의 정보를 우선적으로 활용함으로써 효율성을 더욱 높일 수 있다.
+         * 해결 과제: 전역적 문맥 이해 및 장거리 의존성 모델링
+         * 근거: DiT는 확산 모델에서 U-Net을 성공적으로 대체하며 최첨단 성능을 입증했다.
+
+
+5.3. 구성 요소 2: 2단계, 구조-가이드 생성 프로세스
+
+
+III장에서 논의된 계층적 파이프라인 개념을 도입하여, 생성 과정을 두 단계로 분리한다.
+         1. 1단계 - 구조적 사전 정보 생성 (Structural Prior Generation): 경량의 트랜스포머 인코더-디코더 모델(예: 세그멘테이션 작업에 사용되는 모델)이 마스크된 이미지를 입력받아 손실된 영역에 대한 구조적 사전 정보를 예측한다. 이 사전 정보는 SGDM에서처럼 에지 맵 26이 될 수도 있고, 더 나아가 의미론적 세그멘테이션 맵(semantic segmentation map)이 될 수도 있다. 이 단계는 복잡한 텍스처 생성 부담 없이 오직 '계획'에만 집중한다.
+         2. 2단계 - 가이드된 확산 합성 (Guided Diffusion Synthesis): 주력 모델인 DiT 기반 확산 모델이 인페인팅을 수행한다. 결정적으로, 이 과정은 1단계에서 생성된 구조적 사전 정보를 *조건(condition)*으로 입력받는다. 이 조건화는 DiT 아키텍처에서 흔히 사용되는 교차 어텐션(cross-attention)이나 적응형 레이어 정규화(adaptive layer normalization)와 같은 메커니즘을 통해 구현될 수 있다.9
+         * 해결 과제: 구조와 텍스처 동시 생성의 복잡성, 의미론적 계획 수립
+         * 근거: 생성 과정을 분해하면 각 단계의 목표가 단순화되어 더 안정적이고 제어 가능한 결과를 얻을 수 있다.
+
+
+5.4. 구성 요소 3: 영공간 투영을 통한 정제된 샘플링
+
+
+2단계의 역확산 과정에서 데이터 일관성을 강제하는 단계는 DDRM의 단순 혼합 방식을 완전히 폐기한다. 대신, IV장에서 분석한 DDNM의 영공간 투영 방법을 채택한다.5 이는 생성된 출력이 모든 단계에서 알려진 픽셀과 수학적으로 완벽하게 일치하도록 보장하며, 경계면 아티팩트를 원천적으로 방지한다. 이를 통해 매우 높은 충실도의 데이터 일관성을 달성할 수 있다.
+         * 해결 과제: 데이터 일관성 강제 시 발생하는 경계면 아티팩트 및 비일관성
+         * 근거: 영공간 투영은 선형 역 문제에 대한 수학적으로 가장 정밀한 해법이다.
+
+
+5.5. 구성 요소 4: 고급 손실 함수 및 평가
+
+
+         * 훈련 목표: 제안된 프레임워크는 종단간(end-to-end) 또는 단계별로 훈련될 수 있으며, 복합적인 손실 함수를 사용한다. 여기에는 표준적인 확산 손실, 사실성을 높이기 위한 적대적 손실(adversarial loss), 그리고 결정적으로 LaMa에서 영감을 받은 **높은 수용장 지각적 손실(High Receptive Field Perceptual Loss)**이 포함된다.12 손실 함수 자체가 전역적 구조를 인지할 수 있도록 설계하는 것은, 전역적 수용장을 가진 아키텍처의 능력을 훈련 과정에서 온전히 활용하기 위해 필수적이다.
+         * 평가 프로토콜: 프레임워크의 성공 여부는 Places2와 같은 표준 벤치마크 33에서 검증하되, 특히 LaMa 논문에서 사용된 것과 같은 크고 도전적인 마스크에 초점을 맞춰야 한다.14 평가 지표는 픽셀 단위의 점수(PSNR, SSIM)뿐만 아니라, 생성된 이미지의 지각적 품질과 사실성을 측정하는 FID(Fréchet Inception Distance)와 LPIPS(Learned Perceptual Image Patch Similarity)를 반드시 포함해야 한다.33 궁극적으로는 의미론적 정확성과 시각적 만족도를 평가하기 위한 사용자 연구(user study)도 병행되어야 한다.37
+이처럼 Coherent-DDRM은 DDRM의 한계를 극복하기 위해 아키텍처, 생성 프로세스, 샘플링 메커니즘, 그리고 훈련 목표에 이르기까지 전방위적인 개선을 제안한다. 각 구성 요소는 독립적으로도 강력하지만, 함께 결합되었을 때 대규모 마스크 인페인팅이라는 복합적인 문제를 해결하기 위한 강력한 시너지를 발휘할 것으로 기대된다.
+
+
+구성 요소
+	제안 방법론
+	해결하는 문제점 및 근거
+	핵심 기반 연구
+	백본 아키텍처
+	Diffusion Transformer (DiT)
+	CNN 기반 U-Net의 제한된 수용장으로 인한 전역적 문맥 이해 부족 문제를 해결. 셀프 어텐션으로 장거리 의존성 직접 모델링.
+	DiT 22, MAT 21
+	생성 프로세스
+	2단계 구조-가이드 파이프라인 (구조 예측 → 조건부 텍스처 합성)
+	구조와 텍스처를 동시에 생성해야 하는 복잡성을 분리. 명시적 가이던스를 통해 의미론적 일관성 및 제어 가능성 확보.
+	SGDM 26, Hierarchical Diffusion 25
+	데이터 일관성 메커니즘
+	영공간(Null-Space) 투영
+	DDRM의 단순 혼합 방식이 유발하는 경계면 아티팩트와 비일관성을 원천적으로 방지. 수학적으로 정밀한 데이터 충실도 보장.
+	DDNM 5
+	훈련 목표
+	높은 수용장 지각적 손실 (HRFPL)을 포함한 복합 손실 함수
+	손실 함수가 아키텍처의 전역적 수용장 능력을 제대로 평가하고 활용하도록 보장. 픽셀 단위 손실의 한계를 극복하고 지각적 품질 향상.
+	LaMa 12
+	참고 자료
+         1. Denoising Diffusion Restoration Models, 8월 14, 2025에 액세스, https://proceedings.neurips.cc/paper_files/paper/2022/file/95504595b6169131b6ed6cd72eb05616-Paper-Conference.pdf
+         2. [2201.11793] Denoising Diffusion Restoration Models - arXiv, 8월 14, 2025에 액세스, https://arxiv.org/abs/2201.11793
+         3. Denoising Diffusion Restoration Models, 8월 14, 2025에 액세스, https://ddrm-ml.github.io/
+         4. Denoising Diffusion Restoration Models - OpenReview, 8월 14, 2025에 액세스, https://openreview.net/forum?id=BExXihVOvWq
+         5. [2212.00490] Zero-Shot Image Restoration Using Denoising Diffusion Null-Space Model, 8월 14, 2025에 액세스, https://arxiv.org/abs/2212.00490
+         6. Towards Coherent Image Inpainting Using Denoising Diffusion Implicit Models - Proceedings of Machine Learning Research, 8월 14, 2025에 액세스, https://proceedings.mlr.press/v202/zhang23q/zhang23q.pdf
+         7. RePaint: Inpainting Using Denoising Diffusion Probabilistic Models - CVF Open Access, 8월 14, 2025에 액세스, https://openaccess.thecvf.com/content/CVPR2022/papers/Lugmayr_RePaint_Inpainting_Using_Denoising_Diffusion_Probabilistic_Models_CVPR_2022_paper.pdf
+         8. wyhuai/DDNM: [ICLR 2023 Oral] Zero-Shot Image Restoration Using Denoising Diffusion Null-Space Model - GitHub, 8월 14, 2025에 액세스, https://github.com/wyhuai/DDNM
+         9. Diffusion Transformer (DiT) Models: A Beginner's Guide - Encord, 8월 14, 2025에 액세스, https://encord.com/blog/diffusion-models-with-transformers/
+         10. TransInpaint: Transformer-Based Image Inpainting with Context Adaptation - CVF Open Access, 8월 14, 2025에 액세스, https://openaccess.thecvf.com/content/ICCV2023W/NIVT/papers/Shamsolmoali_TransInpaint_Transformer-Based_Image_Inpainting_with_Context_Adaptation_ICCVW_2023_paper.pdf
+         11. [2305.07239] T-former: An Efficient Transformer for Image Inpainting - arXiv, 8월 14, 2025에 액세스, https://arxiv.org/abs/2305.07239
+         12. Resolution-robust Large Mask Inpainting with Fourier Convolutions - arXiv, 8월 14, 2025에 액세스, http://arxiv.org/pdf/2109.07161
+         13. [2109.07161] Resolution-robust Large Mask Inpainting with Fourier Convolutions - arXiv, 8월 14, 2025에 액세스, https://arxiv.org/abs/2109.07161
+         14. Resolution-robust Large Mask Inpainting with Fourier Convolutions (w/ Author Interview), 8월 14, 2025에 액세스, https://www.youtube.com/watch?v=Lg97gWXsiQ4
+         15. Fast Fourier Convolution - NIPS, 8월 14, 2025에 액세스, https://papers.nips.cc/paper/2020/hash/2fd5d41ec6cfab47e32164d5624269b1-Abstract.html
+         16. Rethinking Fast Fourier Convolution in Image ... - CVF Open Access, 8월 14, 2025에 액세스, https://openaccess.thecvf.com/content/ICCV2023/papers/Chu_Rethinking_Fast_Fourier_Convolution_in_Image_Inpainting_ICCV_2023_paper.pdf
+         17. Introduction to image inpainting with a practical example from the e-commerce industry, 8월 14, 2025에 액세스, https://medium.com/data-science-at-microsoft/introduction-to-image-inpainting-with-a-practical-example-from-the-e-commerce-industry-f81ae6635d5e
+         18. Rethinking Fast Fourier Convolution in Image Inpainting - ICCV 2023 Open Access Repository - The Computer Vision Foundation, 8월 14, 2025에 액세스, https://openaccess.thecvf.com/content/ICCV2023/html/Chu_Rethinking_Fast_Fourier_Convolution_in_Image_Inpainting_ICCV_2023_paper.html
+         19. Transformer-based image and video inpainting: current challenges and future directions, 8월 14, 2025에 액세스, https://www.researchgate.net/publication/388733423_Transformer-based_image_and_video_inpainting_current_challenges_and_future_directions
+         20. Transformer-based Image and Video Inpainting: Current Challenges and Future Directions, 8월 14, 2025에 액세스, https://www.researchgate.net/publication/381882550_Transformer-based_Image_and_Video_Inpainting_Current_Challenges_and_Future_Directions
+         21. MAT: Mask-Aware Transformer for Large Hole ... - CVF Open Access, 8월 14, 2025에 액세스, https://openaccess.thecvf.com/content/CVPR2022/papers/Li_MAT_Mask-Aware_Transformer_for_Large_Hole_Image_Inpainting_CVPR_2022_paper.pdf
+         22. facebookresearch/DiT: Official PyTorch Implementation of "Scalable Diffusion Models with Transformers" - GitHub, 8월 14, 2025에 액세스, https://github.com/facebookresearch/DiT
+         23. Hierarchical Diffusion Framework for Pseudo-Healthy Brain MRI Inpainting with Enhanced 3D Consistency - arXiv, 8월 14, 2025에 액세스, https://arxiv.org/html/2507.17911v1
+         24. Learning A Coarse-to-Fine Diffusion Transformer for Image Restoration - arXiv, 8월 14, 2025에 액세스, https://arxiv.org/html/2308.08730
+         25. Hierarchical Diffusion Framework for Pseudo-Healthy Brain ... - arXiv, 8월 14, 2025에 액세스, https://www.arxiv.org/pdf/2507.17911
+         26. A Structure-Guided Diffusion Model for Large-Hole ... - BMVC 2023, 8월 14, 2025에 액세스, https://papers.bmvc2023.org/0258.pdf
+         27. [2507.21627] GuidPaint: Class-Guided Image Inpainting with Diffusion Models - arXiv, 8월 14, 2025에 액세스, https://arxiv.org/abs/2507.21627
+         28. GuidPaint: Class-Guided Image Inpainting with Diffusion Models - arXiv, 8월 14, 2025에 액세스, https://arxiv.org/html/2507.21627v1
+         29. Improving Text-guided Object Inpainting with Semantic Pre-inpainting - arXiv, 8월 14, 2025에 액세스, https://arxiv.org/html/2409.08260v1
+         30. Inpaint anything using Segment Anything and inpainting models. - GitHub, 8월 14, 2025에 액세스, https://github.com/geekyutao/Inpaint-Anything
+         31. RAD: Region-Aware Diffusion Models for Image Inpainting - arXiv, 8월 14, 2025에 액세스, https://arxiv.org/html/2412.09191v1
+         32. RAD: Region-Aware Diffusion Models for Image Inpainting - CVF Open Access, 8월 14, 2025에 액세스, https://openaccess.thecvf.com/content/CVPR2025/papers/Kim_RAD_Region-Aware_Diffusion_Models_for_Image_Inpainting_CVPR_2025_paper.pdf
+         33. Assessing Image Inpainting via Re-Inpainting Self-Consistency Evaluation - Powerdrill AI, 8월 14, 2025에 액세스, https://powerdrill.ai/discover/discover-Assessing-Image-Inpainting-clxochms70lfw0165yximle7d
+         34. Comparative Analysis of Image Inpainting Techniques - IJSAT, 8월 14, 2025에 액세스, https://www.ijsat.org/papers/2025/2/3019.pdf
+         35. Evaluating AI-generated images (Inpainting) - LINEヤフー Tech Blog, 8월 14, 2025에 액세스, https://techblog.lycorp.co.jp/en/how-to-evaluate-ai-generated-images-3-inpainting
+         36. SayedNadim/Inpainting-Evaluation-Metrics: The goal of this repo is to provide a common evaluation script for image inpainting tasks. It contains some commonly used image quality metrics for inpainting (e.g., L1, L2, SSIM, PSNR and LPIPS). - GitHub, 8월 14, 2025에 액세스, https://github.com/SayedNadim/Inpainting-Evaluation-Metrics
+         37. NeurIPS Poster PrefPaint: Aligning Image Inpainting Diffusion Model with Human Preference, 8월 14, 2025에 액세스, https://neurips.cc/virtual/2024/poster/94203
+         38. PrefPaint: Aligning Image Inpainting Diffusion Model with Human Preference, 8월 14, 2025에 액세스, https://proceedings.neurips.cc/paper_files/paper/2024/hash/3658e78b56268b7fd089e3165843086b-Abstract-Conference.html
+         39. InpDiffusion: Image Inpainting Localization via Conditional Diffusion Models - arXiv, 8월 14, 2025에 액세스, https://arxiv.org/html/2501.02816v1
+         40. Image Inpainting with Edge-guided Learnable Bidirectional Attention Maps - arXiv, 8월 14, 2025에 액세스, http://arxiv.org/pdf/2104.12087
+         41. Structure Matters: Tackling the Semantic Discrepancy in Diffusion Models for Image Inpainting - arXiv, 8월 14, 2025에 액세스, https://arxiv.org/html/2403.19898v2

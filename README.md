@@ -118,3 +118,9 @@ python main.py --ni \
   -i imagenet_inp
 
 ```
+
+
+```bash
+python ultra_main.py     --images-dir /home/juneyonglee/Desktop/ddrm/datasets/test_CN     --masks-dir /home/juneyonglee/Desktop/ddrm/inp_masks/cy_mask/thresh_60_alpha2_0     --output-dir /home/juneyonglee/Desktop/ddrm/outputs_ultrasound_ddrm     --ckpt-path /home/juneyonglee/Desktop/ddrm/final_mixed_training_model.pt     --mask-suffix .png --optuna
+
+```

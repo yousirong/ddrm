@@ -3,3 +3,12 @@ __pycache__/
 *.pth
 exp/
 ultrasound
+best_model_gaussian.pt
+inp_masks
+datasets/train_gt
+datasets/test_CY
+outputs_ultrasound_ddrm
+outputs_ultrasound_ddrm_mask
+datasets/test_CN
+outputs_noise_to_denoising
+final_mixed_training_model.pt
