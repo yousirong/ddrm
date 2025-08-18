@@ -13,8 +13,7 @@ ultra_main.py — diffusers UNet2DModel + 견고한 마스크 매칭 + 마스크
 CLI 예시:
 python ultra_main.py \
   --images-dir /path/images --masks-dir /path/masks --output-dir /path/out --ckpt-path /path/ckpt.pt \
-  --timesteps-list 80,200 --mask-dilate-px 2 --do-refine \
-  --refine-iters 100 --w-lfreq 0.6 --w-hist 0.2 --w-tv 0.0015 --w-seam 0.9 \
+  --timesteps-list 80,200 --mask-dilate-px 2 \
   --optuna --optuna-trials 20 --optuna-samples 4
 """
 
@@ -42,7 +41,7 @@ except ImportError:
     optuna = None
 
 # ===== DDRM 샘플러 =====
-from functions.denoising import efficient_generalized_steps, ddnm_steps
+from functions.denoising import efficient_generalized_steps
 
 # ===== diffusers =====
 
@@ -61,6 +60,10 @@ class InpaintConfig:
     images_dir: str = "/home/juneyonglee/Desktop/ddrm/data/inpaint_inputs"
     masks_dir: str = "/home/juneyonglee/Desktop/ddrm/inp_masks/cy_mask/thresh_60_alpha2_0"
     output_dir: str = "/home/juneyonglee/Desktop/ddrm/outputs_ultrasound_ddrm"
+    
+    # CY→CN 번역 모드용 추가 경로
+    translation_mode: bool = False  # True일 때 CY→CN 번역 모드 사용
+    cn_targets_dir: str = "/home/juneyonglee/Desktop/ddrm/datasets/test_CN"  # CN 타겟 이미지 디렉토리
 
     # 모델
     ckpt_path: str = "/home/juneyonglee/Desktop/ddrm/final_mixed_training_model.pt"
@@ -111,16 +114,6 @@ class InpaintConfig:
 
     # 어닐링/패스 제어
     mask_dilate_px: int = 8          # >0이면 1차 패스에서 Unknown 팽창
-    do_refine: bool = True           # 사후 정제 수행 여부
-
-    # 정제 가중치/횟수
-    refine_iters: int = 150
-    refine_lr: float = 0.1
-    w_lfreq: float = 1.0             # 저주파 일치
-    w_hist: float = 0.25             # 히스토그램(mean/std) 일치
-    w_tv: float = 0.005              # TV 정규화
-    w_seam: float = 0.5              # 경계 링 일치
-    seam_width: int = 3              # 경계 링 너비(픽셀)
 
     # timesteps 리스트(여러 설정 반복)
     _timesteps_list: Tuple[int, ...] = (80, 200)
@@ -134,7 +127,7 @@ class InpaintConfig:
     optuna_aggressive_memory: bool = False  # 더 공격적인 메모리 사용 (24GB+ VRAM용)
 
     # DDNM
-    use_ddnm: bool = True
+    use_ddnm: bool = False
 
     # Patch-based inference
     use_patch_inference: bool = False
@@ -330,20 +323,6 @@ def dilate_unknown_mask(mask01: torch.Tensor, px: int) -> torch.Tensor:
     unk = unk[0, 0]
     return 1.0 - torch.clamp(unk, 0, 1)
 
-def make_seam_ring(mask01: torch.Tensor, width: int) -> torch.Tensor:
-    """
-    Known/Unknown 경계를 중심으로 너비 `width` 픽셀의 링 마스크(Unknown 쪽)에 1을 둠.
-    """
-    width = max(1, int(width))
-    # 에지: |∇mask|
-    k = 2 * width + 1
-    m = mask01[None, None]
-    maxed = F.max_pool2d(m, kernel_size=k, stride=1, padding=width)
-    mined = -F.max_pool2d(-m, kernel_size=k, stride=1, padding=width)
-    edge_band = (maxed - mined)[0, 0]  # [0,1] 범위 근방
-    unknown = (mask01 < 0.5).float()
-    ring = (edge_band > 0.0).float() * unknown
-    return ring
 
 
 # =========================
@@ -431,6 +410,122 @@ class UltrasoundMaskDataset(data.Dataset):
         return x, m_t, str(img_path), str(mask_path)
 
 
+class CYtoCNTranslationDataset(data.Dataset):
+    """CY 이미지를 CN 이미지로 변환하는 목표의 데이터셋"""
+    IMG_EXTS = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"}
+
+    def __init__(self, cy_images_dir: str, cn_targets_dir: str, masks_dir: str, image_size: int,
+                 data_channels: int, model_channels: int, mask_suffix: str,
+                 mask_bin_thresh: float, known_is_white: bool, invert_mask: bool,
+                 skip_missing: bool = True, log_unmatched_to: Optional[Path] = None):
+        self.image_size = image_size
+        self.data_channels = data_channels
+        self.model_channels = model_channels
+        self.mask_bin_thresh = mask_bin_thresh
+        self.known_is_white = known_is_white
+        self.invert_mask = invert_mask
+        self.mask_suffix = mask_suffix
+        self.skip_missing = skip_missing
+
+        cy_dir = Path(cy_images_dir)
+        cn_dir = Path(cn_targets_dir)
+        mask_root = Path(masks_dir)
+
+        # CY 이미지 파일들 수집
+        cy_imgs: List[Path] = []
+        for p in sorted(cy_dir.iterdir()):
+            if p.is_file() and p.suffix.lower() in self.IMG_EXTS:
+                cy_imgs.append(p)
+        if not cy_imgs:
+            raise RuntimeError(f"No CY images found in {cy_dir}")
+
+        # 마스크 파일들 수집
+        mask_files = [Path(x) for x in glob.glob(str(mask_root / "**" / f"*{mask_suffix}"), recursive=True)]
+        if not mask_files:
+            raise RuntimeError(f"No mask files found under {masks_dir} with suffix {mask_suffix}")
+
+        self.triplets: List[Tuple[Path, Path, Path]] = []  # (cy_path, cn_path, mask_path)
+        unmatched: List[str] = []
+
+        for cy_path in cy_imgs:
+            cy_stem = cy_path.stem
+            
+            # CY -> CN 매칭: CY_OY_PC_D000_V3_000 -> CN_OY_PC_D000_V3_000
+            cn_stem = cy_stem.replace('CY_', 'CN_')
+            cn_path = cn_dir / f"{cn_stem}{cy_path.suffix}"
+            
+            if not cn_path.exists():
+                if self.skip_missing:
+                    unmatched.append(f"{cy_stem} (no CN target)")
+                    continue
+                else:
+                    raise FileNotFoundError(f"No CN target found for CY image: {cn_path}")
+
+            chosen_mask = choose_mask_for_image_stem(cy_stem, mask_files)
+            if chosen_mask is None:
+                if self.skip_missing:
+                    unmatched.append(f"{cy_stem} (no mask)")
+                    continue
+                else:
+                    raise FileNotFoundError(f"No mask found for image stem: {cy_stem}")
+            else:
+                self.triplets.append((cy_path, cn_path, chosen_mask))
+
+        if unmatched and log_unmatched_to:
+            ensure_dir(log_unmatched_to.parent)
+            with open(log_unmatched_to, 'w') as f:
+                f.write('\n'.join(unmatched))
+            print(f"[Warn] {len(unmatched)} CY images had no matching CN target or mask and were skipped.")
+            print(f"[Info] Unmatched list written to {log_unmatched_to}")
+
+        if not self.triplets:
+            print(f"[Error] Found {len(cy_imgs)} CY images, {len(mask_files)} masks")
+            for cy_p in cy_imgs[:3]:
+                print(f"  - CY sample: {cy_p.stem}")
+            for m_p in mask_files[:3]:
+                print(f"  - Mask sample: {m_p.stem}")
+            raise RuntimeError("After matching, no (CY, CN, mask) triplets were found. Check naming rules.")
+
+        print(f"[Info] Created CY→CN dataset with {len(self.triplets)} triplets")
+
+    def __len__(self):
+        return len(self.triplets)
+
+    def __getitem__(self, idx) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, str, str, str]:
+        cy_path, cn_path, mask_path = self.triplets[idx]
+        
+        # CY 이미지 로드
+        cy_img_L = load_grayscale(cy_path, self.image_size)
+        cy_x = to_tensor(cy_img_L).float()  # 1xHxW, [0,1]
+        
+        # CN 타겟 이미지 로드
+        cn_img_L = load_grayscale(cn_path, self.image_size)
+        cn_x = to_tensor(cn_img_L).float()  # 1xHxW, [0,1]
+
+        # 채널 조정
+        if self.data_channels == 1 and self.model_channels == 3:
+            cy_x = cy_x.repeat(3, 1, 1)
+            cn_x = cn_x.repeat(3, 1, 1)
+        elif self.data_channels == 1 and self.model_channels == 1:
+            pass
+        elif self.data_channels == 3 and self.model_channels == 3:
+            pass
+        else:
+            raise ValueError(f"Incompatible data/model channels: data={self.data_channels}, model={self.model_channels}")
+
+        # 데이터 변환: [0,1] → [-1,1]
+        cy_x = data_transform(cy_x)
+        cn_x = data_transform(cn_x)
+
+        # 마스크 로드 및 처리
+        m = load_mask_array(mask_path, self.image_size, self.mask_bin_thresh, self.known_is_white)
+        if self.invert_mask:
+            m = 1.0 - m  # 최종 의미: 1=Known, 0=Unknown
+        m_t = torch.from_numpy(m).float()  # HxW
+
+        return cy_x, cn_x, m_t, str(cy_path), str(cn_path), str(mask_path)
+
+
 # =========================
 # Diffusers UNet wrapper
 # =========================
@@ -484,19 +579,38 @@ def build_loader(cfg: InpaintConfig, batch_size: int = 1) -> data.DataLoader:
     out_dir = Path(cfg.output_dir)
     ensure_dir(out_dir)
     unmatched_log = out_dir / "unmatched_images.txt"
-    ds = UltrasoundMaskDataset(
-        images_dir=cfg.images_dir,
-        masks_dir=cfg.masks_dir,
-        image_size=cfg.image_size,
-        data_channels=cfg.data_channels,
-        model_channels=cfg.model_in_channels,
-        mask_suffix=cfg.mask_suffix,
-        mask_bin_thresh=cfg.mask_bin_thresh,
-        known_is_white=cfg.known_is_white,
-        invert_mask=cfg.invert_mask,
-        skip_missing=cfg.skip_missing,
-        log_unmatched_to=unmatched_log,
-    )
+    
+    if cfg.translation_mode:
+        # CY→CN 번역 데이터셋 사용
+        ds = CYtoCNTranslationDataset(
+            cy_images_dir=cfg.images_dir,
+            cn_targets_dir=cfg.cn_targets_dir,
+            masks_dir=cfg.masks_dir,
+            image_size=cfg.image_size,
+            data_channels=cfg.data_channels,
+            model_channels=cfg.model_in_channels,
+            mask_suffix=cfg.mask_suffix,
+            mask_bin_thresh=cfg.mask_bin_thresh,
+            known_is_white=cfg.known_is_white,
+            invert_mask=cfg.invert_mask,
+            skip_missing=cfg.skip_missing,
+            log_unmatched_to=unmatched_log,
+        )
+    else:
+        # 기존 DDRM inpainting 데이터셋 사용
+        ds = UltrasoundMaskDataset(
+            images_dir=cfg.images_dir,
+            masks_dir=cfg.masks_dir,
+            image_size=cfg.image_size,
+            data_channels=cfg.data_channels,
+            model_channels=cfg.model_in_channels,
+            mask_suffix=cfg.mask_suffix,
+            mask_bin_thresh=cfg.mask_bin_thresh,
+            known_is_white=cfg.known_is_white,
+            invert_mask=cfg.invert_mask,
+            skip_missing=cfg.skip_missing,
+            log_unmatched_to=unmatched_log,
+        )
     loader = data.DataLoader(
         ds,
         batch_size=batch_size,
@@ -646,7 +760,8 @@ def ddrm_sample_batch(x_batch: torch.Tensor, mask_batch: torch.Tensor, model: nn
 
 
 def process_batch(x_batch: torch.Tensor, mask_batch: torch.Tensor, model: nn.Module,
-                  betas: torch.Tensor, cfg: InpaintConfig, device: torch.device) -> torch.Tensor:
+                  betas: torch.Tensor, cfg: InpaintConfig, device: torch.device, 
+                  cn_target_batch: Optional[torch.Tensor] = None) -> torch.Tensor:
     """
     배치 단위로 전체 파이프라인(2-패스 + 정제) 처리
 
@@ -676,12 +791,7 @@ def process_batch(x_batch: torch.Tensor, mask_batch: torch.Tensor, model: nn.Mod
         x_pass2_last = xs_pass2[-1].detach()
 
         # 정제 사용 시
-        if cfg.do_refine:
-            x_final = refine_unknown_with_guidance(
-                x_in=x_pass2_last, x_context=x_single, mask01=mask_single, cfg=cfg
-            )
-        else:
-            x_final = x_pass2_last
+        x_final = x_pass2_last
 
         final_results.append(x_final)
 
@@ -697,103 +807,6 @@ def process_batch(x_batch: torch.Tensor, mask_batch: torch.Tensor, model: nn.Mod
     return torch.cat(final_results, dim=0)
 
 
-# =========================
-# 사후 정제(Unknown만 최적화)
-# =========================
-def gaussian_blur(img: torch.Tensor, k: int = 15, sigma: float = 5.0) -> torch.Tensor:
-    coords = torch.arange(k, device=img.device, dtype=img.dtype) - (k - 1) / 2
-    ker1 = torch.exp(-(coords ** 2) / (2 * sigma ** 2))
-    ker1 = (ker1 / ker1.sum()).view(1, 1, -1, 1)
-    ker2 = ker1.transpose(2, 3)
-    ch = img.shape[1]
-    img = F.conv2d(img, ker1.repeat(ch, 1, 1, 1), padding=(k // 2, 0), groups=ch)
-    img = F.conv2d(img, ker2.repeat(ch, 1, 1, 1), padding=(0, k // 2), groups=ch)
-    return img
-
-def total_variation(x: torch.Tensor) -> torch.Tensor:
-    dx = x[:, :, :, 1:] - x[:, :, :, :-1]
-    dy = x[:, :, 1:, :] - x[:, :, :-1, :]
-    return (dx.abs().mean() + dy.abs().mean())
-
-def match_mean_std_loss(x_u: torch.Tensor, ref_k: torch.Tensor) -> torch.Tensor:
-    eps = 1e-6
-    def stats(t):
-        s = t.sum(dim=[2,3], keepdim=True)
-        n = (t != 0).float().sum(dim=[2,3], keepdim=True).clamp_min(1.0)
-        mean = s / n
-        var = ((t - mean) * (t != 0).float()).pow(2).sum(dim=[2,3], keepdim=True) / n.clamp_min(1.0)
-        std = (var + eps).sqrt()
-        return mean, std
-    mu_u, std_u = stats(x_u)
-    mu_k, std_k = stats(ref_k)
-    return (mu_u - mu_k).abs().mean() + (std_u - std_k).abs().mean()
-
-def refine_unknown_with_guidance(x_in: torch.Tensor, x_context: torch.Tensor, mask01: torch.Tensor,
-                                 cfg: InpaintConfig) -> torch.Tensor:
-    """
-    x_in: DDRM 출력(1xCxHxW, [-1,1])
-    x_context: 원본 입력(1xCxHxW, [-1,1])
-    mask01: 1=Known, 0=Unknown
-    Unknown 영역만 업데이트(Adam)하며 다음 손실 최소화:
-      - 저주파 일치(가우시안 블러)
-      - 히스토그램(mean/std) 일치(Unknown vs Known)
-      - TV(Unknown)
-      - 경계 링(seam)에서의 컨텍스트 근접
-    """
-    device = x_in.device
-    dtype = x_in.dtype
-    C = x_in.shape[1]
-
-    # === 모든 텐서를 같은 device/dtype으로 강제 정렬 (device mismatch 오류 방지) ===
-    x = x_in.clone().to(device=device, dtype=dtype).detach().requires_grad_(True)
-    x_context = x_context.to(device=device, dtype=dtype)
-    mask01_d = mask01.to(device=device, dtype=dtype)
-
-    known01_c, unknown01_c = _build_mask_stacks(mask01_d, C)
-    known01_c = known01_c.to(device=device, dtype=dtype)
-    unknown01_c = unknown01_c.to(device=device, dtype=dtype)
-
-    seam_ring = make_seam_ring(mask01_d, cfg.seam_width)[None, None, :, :].repeat(1, C, 1, 1)
-    seam_ring = seam_ring.to(device=device, dtype=dtype)
-
-    opt = torch.optim.Adam([x], lr=cfg.refine_lr)
-
-    # 저주파 타깃: 원본의 블러
-    target_lfreq = gaussian_blur(x_context, k=15, sigma=5.0).detach()
-
-    for _ in range(cfg.refine_iters):
-        opt.zero_grad()
-        # Unknown/Known 마스크 적용
-        x_u = x * unknown01_c
-        x_k = x_context * known01_c
-
-        # 1) 저주파 일치
-        l_lf = F.mse_loss(gaussian_blur(x), target_lfreq)
-
-        # 2) 히스토그램(mean/std) 일치(Unknown 대비 Known)
-        l_hist = match_mean_std_loss(x_u, x_k)
-
-        # 3) TV(Unknown)
-        l_tv = total_variation(x * unknown01_c)
-
-        # 4) 경계 링에서 컨텍스트 근접
-        l_seam = F.l1_loss(x * seam_ring, x_context * seam_ring)
-
-        loss = cfg.w_lfreq * l_lf + cfg.w_hist * l_hist + cfg.w_tv * l_tv + cfg.w_seam * l_seam
-        loss.backward()
-
-        # Unknown만 업데이트되도록 gradient mask
-        with torch.no_grad():
-            if x.grad is not None:
-                x.grad.mul_(unknown01_c)
-        opt.step()
-
-        with torch.no_grad():
-            # Known은 항상 컨텍스트로 고정
-            x.data = known01_c * x_context + unknown01_c * x.data
-            x.data.clamp_(-1.0, 1.0)
-
-    return x.detach()
 
 
 # =========================
@@ -949,13 +962,8 @@ def process_one(x_orig: torch.Tensor, mask01: torch.Tensor, model: nn.Module,
     xs_pass2 = ddrm_sample(x_pass1_last, mask01, model, betas, cfg, device)
     x_pass2_last = xs_pass2[-1].detach()
 
-    # 정제 사용 시
-    if cfg.do_refine:
-        x_final = refine_unknown_with_guidance(
-            x_in=x_pass2_last, x_context=x_orig, mask01=mask01, cfg=cfg
-        )
-    else:
-        x_final = x_pass2_last
+    # 최종 결과
+    x_final = x_pass2_last
 
     tag = f"_{ts_label}"
 
@@ -981,11 +989,9 @@ def run_ddrm_inpaint(cfg: InpaintConfig):
 
     print(f"[Info] Total matched pairs: {len(loader.dataset)}")
     print(f"[Info] init_noise_std={cfg.init_noise_std}, invert_mask={cfg.invert_mask}, mask_dilate_px={cfg.mask_dilate_px}")
-    print(f"[Info] refine(do_refine={cfg.do_refine}): iters={cfg.refine_iters}, "
-          f"w_lfreq={cfg.w_lfreq}, w_hist={cfg.w_hist}, w_tv={cfg.w_tv}, w_seam={cfg.w_seam}")
 
     for timesteps in cfg._timesteps_list:
-        ts_output_dir = Path(cfg.output_dir) / f"ts_{timesteps}_anneal{cfg.mask_dilate_px}_ref{int(cfg.do_refine)}"
+        ts_output_dir = Path(cfg.output_dir) / f"ts_{timesteps}_anneal{cfg.mask_dilate_px}"
         ensure_dir(ts_output_dir)
 
         original_timesteps = cfg.timesteps
@@ -1081,6 +1087,52 @@ def mae_unknown_batch(pred_batch: torch.Tensor, gt_batch: torch.Tensor, mask_bat
 
     return float((total_err / total_pixels).item())
 
+
+def mae_translation(pred: torch.Tensor, cn_target: torch.Tensor) -> float:
+    """
+    CY→CN 번역 목표: 전체 이미지에 대한 MAE 계산
+    
+    Args:
+        pred: [C,H,W] in [-1,1]
+        cn_target: [C,H,W] in [-1,1]
+    
+    Returns:
+        float: MAE 값
+    """
+    pred01 = (pred + 1.0) / 2.0  # [-1,1] → [0,1]
+    cn01 = (cn_target + 1.0) / 2.0  # [-1,1] → [0,1]
+    
+    err = (pred01 - cn01).abs()
+    return float(err.mean().item())
+
+
+def mae_translation_batch(pred_batch: torch.Tensor, cn_target_batch: torch.Tensor) -> float:
+    """
+    배치 단위로 CY→CN 번역 MAE 계산
+    
+    Args:
+        pred_batch: [B,C,H,W] in [-1,1]
+        cn_target_batch: [B,C,H,W] in [-1,1]
+    
+    Returns:
+        float: 배치 전체 평균 MAE
+    """
+    device = pred_batch.device
+    dtype = pred_batch.dtype
+    
+    # 모두 같은 device/dtype으로 정렬
+    pred_batch = pred_batch.to(device=device, dtype=dtype)
+    cn_target_batch = cn_target_batch.to(device=device, dtype=dtype)
+    
+    # [-1,1] → [0,1] 변환
+    pred01 = (pred_batch + 1.0) / 2.0
+    cn01 = (cn_target_batch + 1.0) / 2.0
+    
+    # 전체 이미지에 대한 MAE
+    err = (pred01 - cn01).abs()
+    return float(err.mean().item())
+
+
 def run_optuna(cfg: InpaintConfig):
     if optuna is None:
         raise ImportError("Optuna가 설치되어 있지 않습니다. 먼저 `pip install optuna`를 수행하세요.")
@@ -1103,7 +1155,8 @@ def run_optuna(cfg: InpaintConfig):
     N_batches = (N + batch_size - 1) // batch_size
 
     aggressive_str = " (aggressive)" if base_cfg.optuna_aggressive_memory else ""
-    print(f"[Optuna] trials={base_cfg.optuna_trials}, samples={N}, batch_size={batch_size}{aggressive_str}, batches={N_batches}")
+    translation_str = " (CY→CN translation mode)" if base_cfg.translation_mode else " (DDRM inpainting mode)"
+    print(f"[Optuna] trials={base_cfg.optuna_trials}, samples={N}, batch_size={batch_size}{aggressive_str}, batches={N_batches}{translation_str}")
 
     # 초기 GPU 메모리 상태 출력
     mem_info = get_gpu_memory_info()
@@ -1118,16 +1171,6 @@ def run_optuna(cfg: InpaintConfig):
         init_noise_std = trial.suggest_float("init_noise_std", 0.2, 1.0)
         mask_dilate_px = trial.suggest_int("mask_dilate_px", 0, 8)
 
-        # do_refine을 반반으로 나누어 배정 (짝수: False, 홀수: True)
-        do_refine = (trial.number % 2) == 1
-        refine_iters = trial.suggest_int("refine_iters", 30, 200)
-        refine_lr = trial.suggest_float("refine_lr", 0.02, 0.1)
-        w_lfreq = trial.suggest_float("w_lfreq", 0.2, 2.0)
-        w_hist = trial.suggest_float("w_hist", 0.05, 0.4)
-        w_tv = trial.suggest_float("w_tv", 0.0005, 0.005)
-        w_seam = trial.suggest_float("w_seam", 0.3, 1.5)
-        seam_width = trial.suggest_int("seam_width", 1, 4)
-
         # ----- trial용 cfg 구성 -----
         tcfg = replace(
             base_cfg,
@@ -1135,14 +1178,6 @@ def run_optuna(cfg: InpaintConfig):
             eta_b=eta_b, eta_c=eta_c,
             init_noise_std=init_noise_std,
             mask_dilate_px=mask_dilate_px,
-            do_refine=do_refine,
-            refine_iters=refine_iters,
-            refine_lr=refine_lr,
-            w_lfreq=w_lfreq,
-            w_hist=w_hist,
-            w_tv=w_tv,
-            w_seam=w_seam,
-            seam_width=seam_width,
             _timesteps_list=(timesteps,),  # optuna에선 단일 timesteps로 평가
         )
 
@@ -1162,32 +1197,53 @@ def run_optuna(cfg: InpaintConfig):
             if batch_idx >= N_batches:
                 break
 
-            x_batch, mask_batch, _, _ = batch_data
-            current_batch_size = x_batch.shape[0]
+            if base_cfg.translation_mode:
+                # CY→CN 번역 모드: (cy_x, cn_x, mask, cy_path, cn_path, mask_path)
+                cy_batch, cn_batch, mask_batch, _, _, _ = batch_data
+                current_batch_size = cy_batch.shape[0]
 
-            x_batch = x_batch.to(device)
-            mask_batch = mask_batch.to(device)  # [B,H,W]
+                cy_batch = cy_batch.to(device)
+                cn_batch = cn_batch.to(device)
+                mask_batch = mask_batch.to(device)  # [B,H,W]
 
-            # 배치 처리
-            x_final_batch = process_batch(x_batch, mask_batch, model, betas, tcfg, device)
+                # 배치 처리 (CY 이미지를 입력으로 사용)
+                x_final_batch = process_batch(cy_batch, mask_batch, model, betas, tcfg, device, cn_batch)
 
-            # 배치 단위 MAE 계산
-            batch_score = mae_unknown_batch(x_final_batch, x_batch, mask_batch)
-            total_score += batch_score * current_batch_size
-            total_samples += current_batch_size
+                # CY→CN 번역 MAE 계산 (전체 이미지 기준)
+                batch_score = mae_translation_batch(x_final_batch, cn_batch)
+                total_score += batch_score * current_batch_size
+                total_samples += current_batch_size
 
-            # 메모리 안정화
-            del x_final_batch, x_batch, mask_batch
+                # 메모리 안정화
+                del x_final_batch, cy_batch, cn_batch, mask_batch
+            else:
+                # 기존 DDRM inpainting 모드
+                x_batch, mask_batch, _, _ = batch_data
+                current_batch_size = x_batch.shape[0]
+
+                x_batch = x_batch.to(device)
+                mask_batch = mask_batch.to(device)  # [B,H,W]
+
+                # 배치 처리
+                x_final_batch = process_batch(x_batch, mask_batch, model, betas, tcfg, device)
+
+                # 배치 단위 MAE 계산
+                batch_score = mae_unknown_batch(x_final_batch, x_batch, mask_batch)
+                total_score += batch_score * current_batch_size
+                total_samples += current_batch_size
+
+                # 메모리 안정화
+                del x_final_batch, x_batch, mask_batch
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
 
         mean_score = total_score / max(total_samples, 1)
 
-        # Trial 종료 시 메모리 사용량 및 do_refine 상태 출력
+        # Trial 종료 시 메모리 사용량 출력
         mem_info = get_gpu_memory_info()
-        refine_str = "refine" if do_refine else "no-refine"
+        mode_str = "Translation" if base_cfg.translation_mode else "Inpainting"
         if mem_info:
-            print(f"[Trial {trial.number}] MAE: {mean_score:.4f}, GPU Peak: {mem_info['max_allocated']:.2f}GB, {refine_str}")
+            print(f"[Trial {trial.number}] {mode_str} MAE: {mean_score:.4f}, GPU Peak: {mem_info['max_allocated']:.2f}GB")
 
         return mean_score
 
@@ -1200,91 +1256,24 @@ def run_optuna(cfg: InpaintConfig):
         study.optimize(objective, n_trials=base_cfg.optuna_trials, catch=(RuntimeError,))
 
 
-    # do_refine True/False별로 best trial 분리
-    refine_trials = []
-    no_refine_trials = []
-    
-    for trial in study.trials:
-        if trial.state == optuna.trial.TrialState.COMPLETE:
-            # trial number로 do_refine 값 결정 (objective 함수와 동일한 로직)
-            do_refine = (trial.number % 2) == 1
-            if do_refine:
-                refine_trials.append(trial)
-            else:
-                no_refine_trials.append(trial)
-    
+    print("\n[Optuna] Best trial:")
+    print("  value:", study.best_trial.value)
+    print("  params:")
+    for k, v in study.best_trial.params.items():
+        print(f"    {k}: {v}")
+
+    # Best params를 파일로 저장 (번역 모드와 일반 모드 구분)
     out_dir = Path(base_cfg.output_dir)
     ensure_dir(out_dir)
-    
-    print(f"\n[Optuna] Results: {len(refine_trials)} refine trials, {len(no_refine_trials)} no-refine trials")
-    
-    # do_refine=True 중 best
-    if refine_trials:
-        best_refine = min(refine_trials, key=lambda t: t.value)
-        print(f"\n[Best with REFINE]:")
-        print(f"  value: {best_refine.value:.6f}")
-        print(f"  trial: {best_refine.number}")
-        print("  params:")
-        for k, v in best_refine.params.items():
-            print(f"    {k}: {v}")
-        
-        # refine=True best params 저장
-        with open(out_dir / "optuna_best_params_refine.txt", "w") as f:
-            f.write(f"# Best parameters for do_refine=True\n")
-            f.write(f"best_value={best_refine.value}\n")
-            f.write(f"trial_number={best_refine.number}\n")
-            f.write(f"do_refine=True\n")
-            for k, v in best_refine.params.items():
-                f.write(f"{k}={v}\n")
-    
-    # do_refine=False 중 best  
-    if no_refine_trials:
-        best_no_refine = min(no_refine_trials, key=lambda t: t.value)
-        print(f"\n[Best WITHOUT REFINE]:")
-        print(f"  value: {best_no_refine.value:.6f}")
-        print(f"  trial: {best_no_refine.number}")
-        print("  params:")
-        for k, v in best_no_refine.params.items():
-            print(f"    {k}: {v}")
-        
-        # refine=False best params 저장
-        with open(out_dir / "optuna_best_params_no_refine.txt", "w") as f:
-            f.write(f"# Best parameters for do_refine=False\n")
-            f.write(f"best_value={best_no_refine.value}\n")
-            f.write(f"trial_number={best_no_refine.number}\n")
-            f.write(f"do_refine=False\n")
-            for k, v in best_no_refine.params.items():
-                f.write(f"{k}={v}\n")
-    
-    # 전체 best (기존 호환성을 위해 유지)
-    print(f"\n[Overall Best]:")
-    print(f"  value: {study.best_trial.value:.6f}")
-    print(f"  trial: {study.best_trial.number}")
-    overall_do_refine = (study.best_trial.number % 2) == 1
-    print(f"  do_refine: {overall_do_refine}")
-    
-    # 전체 best params 저장 (기존)
-    with open(out_dir / "optuna_best_params.txt", "w") as f:
-        f.write(f"# Overall best parameters\n")
+    mode_suffix = "_CN" if base_cfg.translation_mode else ""
+    params_file = out_dir / f"optuna_best_params{mode_suffix}.txt"
+    with open(params_file, "w") as f:
         f.write(f"best_value={study.best_trial.value}\n")
-        f.write(f"trial_number={study.best_trial.number}\n")
-        f.write(f"do_refine={overall_do_refine}\n")
+        f.write(f"translation_mode={base_cfg.translation_mode}\n")
         for k, v in study.best_trial.params.items():
             f.write(f"{k}={v}\n")
     
-    # 비교 분석 결과 저장
-    if refine_trials and no_refine_trials:
-        refine_improvement = ((best_no_refine.value - best_refine.value) / best_no_refine.value) * 100
-        with open(out_dir / "optuna_comparison.txt", "w") as f:
-            f.write(f"# Refine vs No-Refine Comparison\n")
-            f.write(f"best_refine_value={best_refine.value:.6f}\n")
-            f.write(f"best_no_refine_value={best_no_refine.value:.6f}\n")
-            f.write(f"refine_improvement_percent={refine_improvement:.2f}%\n")
-            f.write(f"refine_is_better={best_refine.value < best_no_refine.value}\n")
-        
-        print(f"\n[Comparison]:")
-        print(f"  Refine improvement: {refine_improvement:.2f}%")
-        print(f"  Refine is better: {best_refine.value < best_no_refine.value}")
+    print(f"\n[Optuna] Best parameters saved to: {params_file}")
 
 
 # =========================
@@ -1350,15 +1339,6 @@ def build_argparser():
     p.add_argument("--init-noise-std", type=float, default=0.5,
                    help="Unknown(마스크=0) 영역에 사용할 그레이스케일 가우시안 초기화 표준편차")
 
-    # 사후 정제
-    p.add_argument("--do-refine", action="store_true", help="사후 정제(저주파/히스토그램/TV/경계) 수행")
-    p.add_argument("--refine-iters", type=int, default=100)
-    p.add_argument("--refine-lr", type=float, default=0.05)
-    p.add_argument("--w-lfreq", type=float, default=0.6)
-    p.add_argument("--w-hist", type=float, default=0.2)
-    p.add_argument("--w-tv", type=float, default=0.0015)
-    p.add_argument("--w-seam", type=float, default=0.9)
-    p.add_argument("--seam-width", type=int, default=2)
 
     # Optuna
     p.add_argument("--optuna", action="store_true", help="Optuna로 하이퍼파라미터 최적화 수행")
@@ -1368,7 +1348,9 @@ def build_argparser():
     p.add_argument("--optuna-n-jobs", type=int, default=2, help="Optuna 병렬 작업 수 (GPU 메모리가 충분한 경우만)")
     p.add_argument("--optuna-aggressive-memory", action="store_true", help="더 공격적인 메모리 사용 (배치 크기 최대 12까지)")
 
-
+    # CY→CN 번역 모드
+    p.add_argument("--translation-mode", action="store_true", help="CY→CN 이미지 번역 모드 사용")
+    p.add_argument("--cn-targets-dir", type=str, help="CN 타겟 이미지 디렉토리 (번역 모드에서만 사용)")
 
     # Patch-based inference
     p.add_argument("--use-patch-inference", action="store_true", help="Use patch-based inference")
@@ -1416,14 +1398,6 @@ def args_to_config(args: argparse.Namespace) -> InpaintConfig:
         masked_noise_init=True,
         init_noise_std=args.init_noise_std,
         mask_dilate_px=args.mask_dilate_px,
-        do_refine=args.do_refine,
-        refine_iters=args.refine_iters,
-        refine_lr=args.refine_lr,
-        w_lfreq=args.w_lfreq,
-        w_hist=args.w_hist,
-        w_tv=args.w_tv,
-        w_seam=args.w_seam,
-        seam_width=args.seam_width,
         optuna_mode=bool(args.optuna),
         optuna_trials=int(args.optuna_trials),
         optuna_samples=int(args.optuna_samples),
@@ -1433,6 +1407,8 @@ def args_to_config(args: argparse.Namespace) -> InpaintConfig:
         use_patch_inference=args.use_patch_inference,
         patch_size=args.patch_size,
         patch_stride=args.patch_stride,
+        translation_mode=args.translation_mode,
+        cn_targets_dir=args.cn_targets_dir or "/home/juneyonglee/Desktop/ddrm/datasets/test_CN",
     )
 
     # timesteps-list 파싱
@@ -1460,7 +1436,9 @@ def main():
     args = parser.parse_args()
 
     # --- Auto-apply best Optuna params ---
-    best_params_file = Path(args.output_dir) / "optuna_best_params.txt"
+    # 번역 모드에 따라 다른 최적화 파일 사용
+    mode_suffix = "_CN" if args.translation_mode else ""
+    best_params_file = Path(args.output_dir) / f"optuna_best_params{mode_suffix}.txt"
     if best_params_file.exists():
         print(f"[Info] Applying best parameters from {best_params_file}")
         with open(best_params_file, "r") as f:
@@ -1491,7 +1469,6 @@ def main():
     print("Config:", {k: v for k, v in asdict(cfg).items()
                      if k in ["images_dir","masks_dir","output_dir","ckpt_path",
                               "init_noise_std","invert_mask","mask_dilate_px",
-                              "do_refine","refine_iters","w_lfreq","w_hist","w_tv","w_seam",
                               "optuna_mode","optuna_trials","optuna_samples"]})
 
     if cfg.optuna_mode:

@@ -11,7 +11,7 @@ import torch.utils.data as data
 from models.diffusion import Model
 from datasets import get_dataset, data_transform, inverse_data_transform
 from functions.ckpt_util import get_ckpt_path, download
-from functions.denoising import efficient_generalized_steps, ddnm_steps
+from functions.denoising import efficient_generalized_steps
 
 import torchvision.utils as tvu
 
@@ -334,12 +334,8 @@ class Diffusion(object):
         skip = self.num_timesteps // self.args.timesteps
         seq = range(0, self.num_timesteps, skip)
 
-        if self.args.use_ddnm:
-            x = ddnm_steps(x, seq, model, self.betas, H_funcs, y_0, sigma_0, \
-                etaB=self.args.etaB, etaA=self.args.eta, etaC=self.args.eta, cls_fn=cls_fn, classes=classes)
-        else:
-            x = efficient_generalized_steps(x, seq, model, self.betas, H_funcs, y_0, sigma_0, \
-                etaB=self.args.etaB, etaA=self.args.eta, etaC=self.args.eta, cls_fn=cls_fn, classes=classes)
+        x = efficient_generalized_steps(x, seq, model, self.betas, H_funcs, y_0, sigma_0, \
+            etaB=self.args.etaB, etaA=self.args.eta, etaC=self.args.eta, cls_fn=cls_fn, classes=classes)
         if last:
             x = x[0][-1]
         return x
