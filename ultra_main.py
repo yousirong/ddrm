@@ -1200,19 +1200,91 @@ def run_optuna(cfg: InpaintConfig):
         study.optimize(objective, n_trials=base_cfg.optuna_trials, catch=(RuntimeError,))
 
 
-    print("\n[Optuna] Best trial:")
-    print("  value:", study.best_trial.value)
-    print("  params:")
-    for k, v in study.best_trial.params.items():
-        print(f"    {k}: {v}")
-
-    # Best params를 파일로 저장
+    # do_refine True/False별로 best trial 분리
+    refine_trials = []
+    no_refine_trials = []
+    
+    for trial in study.trials:
+        if trial.state == optuna.trial.TrialState.COMPLETE:
+            # trial number로 do_refine 값 결정 (objective 함수와 동일한 로직)
+            do_refine = (trial.number % 2) == 1
+            if do_refine:
+                refine_trials.append(trial)
+            else:
+                no_refine_trials.append(trial)
+    
     out_dir = Path(base_cfg.output_dir)
     ensure_dir(out_dir)
+    
+    print(f"\n[Optuna] Results: {len(refine_trials)} refine trials, {len(no_refine_trials)} no-refine trials")
+    
+    # do_refine=True 중 best
+    if refine_trials:
+        best_refine = min(refine_trials, key=lambda t: t.value)
+        print(f"\n[Best with REFINE]:")
+        print(f"  value: {best_refine.value:.6f}")
+        print(f"  trial: {best_refine.number}")
+        print("  params:")
+        for k, v in best_refine.params.items():
+            print(f"    {k}: {v}")
+        
+        # refine=True best params 저장
+        with open(out_dir / "optuna_best_params_refine.txt", "w") as f:
+            f.write(f"# Best parameters for do_refine=True\n")
+            f.write(f"best_value={best_refine.value}\n")
+            f.write(f"trial_number={best_refine.number}\n")
+            f.write(f"do_refine=True\n")
+            for k, v in best_refine.params.items():
+                f.write(f"{k}={v}\n")
+    
+    # do_refine=False 중 best  
+    if no_refine_trials:
+        best_no_refine = min(no_refine_trials, key=lambda t: t.value)
+        print(f"\n[Best WITHOUT REFINE]:")
+        print(f"  value: {best_no_refine.value:.6f}")
+        print(f"  trial: {best_no_refine.number}")
+        print("  params:")
+        for k, v in best_no_refine.params.items():
+            print(f"    {k}: {v}")
+        
+        # refine=False best params 저장
+        with open(out_dir / "optuna_best_params_no_refine.txt", "w") as f:
+            f.write(f"# Best parameters for do_refine=False\n")
+            f.write(f"best_value={best_no_refine.value}\n")
+            f.write(f"trial_number={best_no_refine.number}\n")
+            f.write(f"do_refine=False\n")
+            for k, v in best_no_refine.params.items():
+                f.write(f"{k}={v}\n")
+    
+    # 전체 best (기존 호환성을 위해 유지)
+    print(f"\n[Overall Best]:")
+    print(f"  value: {study.best_trial.value:.6f}")
+    print(f"  trial: {study.best_trial.number}")
+    overall_do_refine = (study.best_trial.number % 2) == 1
+    print(f"  do_refine: {overall_do_refine}")
+    
+    # 전체 best params 저장 (기존)
     with open(out_dir / "optuna_best_params.txt", "w") as f:
+        f.write(f"# Overall best parameters\n")
         f.write(f"best_value={study.best_trial.value}\n")
+        f.write(f"trial_number={study.best_trial.number}\n")
+        f.write(f"do_refine={overall_do_refine}\n")
         for k, v in study.best_trial.params.items():
             f.write(f"{k}={v}\n")
+    
+    # 비교 분석 결과 저장
+    if refine_trials and no_refine_trials:
+        refine_improvement = ((best_no_refine.value - best_refine.value) / best_no_refine.value) * 100
+        with open(out_dir / "optuna_comparison.txt", "w") as f:
+            f.write(f"# Refine vs No-Refine Comparison\n")
+            f.write(f"best_refine_value={best_refine.value:.6f}\n")
+            f.write(f"best_no_refine_value={best_no_refine.value:.6f}\n")
+            f.write(f"refine_improvement_percent={refine_improvement:.2f}%\n")
+            f.write(f"refine_is_better={best_refine.value < best_no_refine.value}\n")
+        
+        print(f"\n[Comparison]:")
+        print(f"  Refine improvement: {refine_improvement:.2f}%")
+        print(f"  Refine is better: {best_refine.value < best_no_refine.value}")
 
 
 # =========================
