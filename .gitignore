@@ -12,3 +12,5 @@ outputs_ultrasound_ddrm_mask
 datasets/test_CN
 outputs_noise_to_denoising
 final_mixed_training_model.pt
+best_model_phase2.pt
+datasets/test_CY_ON

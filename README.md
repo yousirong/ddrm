@@ -104,23 +104,25 @@ This implementation is based on / inspired by:
 
 
 ```bash
-export CUDA_VISIBLE_DEVICES=1
-python main.py --ni   --config imagenet_256.yml   --doc imagenet_inpainting   --timesteps 20   --eta 0.85   --etaB 1   --deg inp   --sigma_0 0.0   -i imagenet_inp
-
-python main.py --ni \
-  --config imagenet_256.yml \
-  --doc imagenet_inpainting_stronger \
-  --timesteps 20 \
-  --eta 1.0 \
-  --etaB 1 \
-  --deg inp \
-  --sigma_0 1.0 \
-  -i imagenet_inp
+export CUDA_VISIBLE_DEVICES=2
+python us_ddnm_main.py --images-dir /home/ubuntu/Desktop/JY/ddrm/datasets --masks-dir /home/ubuntu/Desktop/JY/ddrm/inp_masks/cy_mask/thresh_60_alpha2_0 --output-dir /home/ubuntu/Desktop/JY/ddrm/outputs_ultrasound_ddrm --ckpt-path /home/ubuntu/Desktop/JY/ddrm/final_mixed_training_model.pt --translation-mode --cn-targets-dir /home/ubuntu/Desktop/JY/ddrm/datasets/test_CN --mask-suffix "_mask_alpha2.0.png" --use-log-domain --use-ddnm-sampling --use-dpm-solver --dpm-solver-steps 20 --timesteps 100
 
 ```
 
 
 ```bash
-python ultra_main.py     --images-dir /home/juneyonglee/Desktop/ddrm/datasets/test_CN     --masks-dir /home/juneyonglee/Desktop/ddrm/inp_masks/cy_mask/thresh_60_alpha2_0     --output-dir /home/juneyonglee/Desktop/ddrm/outputs_ultrasound_ddrm     --ckpt-path /home/juneyonglee/Desktop/ddrm/final_mixed_training_model.pt     --mask-suffix .png --optuna
+python ultra_main.py --images-dir /home/ubuntu/Desktop/JY/ddrm/datasets --masks-dir /home/ubuntu/Desktop/JY/ddrm/inp_masks/cy_mask/thresh_60_alpha2_0 --output-dir /home/ubuntu/Desktop/JY/ddrm/outputs_ultrasound_ddrm --ckpt-path /home/ubuntu/Desktop/JY/ddrm/final_mixed_training_model.pt --translation-mode --cn-targets-dir /home/ubuntu/Desktop/JY/ddrm/datasets/test_CN --optuna     --optuna-trials 40 --optuna-samples 32 --optuna-batch-size 64 --optuna-aggressive-memory --mask-suffix "_mask_alpha2.0.png"
 
+```
+
+```bash
+
+ python ultra_main.py --ddnm-only \
+    --images-dir /home/ubuntu/Desktop/JY/ddrm/datasets \
+    --masks-dir /home/ubuntu/Desktop/JY/ddrm/inp_masks/cy_mask/thresh_60_alpha2_0 \
+    --output-dir /home/ubuntu/Desktop/JY/ddrm/outputs_ultrasound_ddrm_only \
+    --ckpt-path /home/ubuntu/Desktop/JY/ddrm/final_mixed_training_model.pt \
+    --cyon-source-dir /home/ubuntu/Desktop/JY/ddrm/datasets/test_CY_ON \
+    --mask-suffix "_mask_alpha2.0.png" \
+    --timesteps-list "50"
 ```
