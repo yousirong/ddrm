@@ -1,0 +1,70 @@
+# Ultrasound DDRM Configuration
+data:
+  dataset: "ultrasound"
+  image_size: 512  # Updated for 512x512 DDPM model
+  channels: 1  # Grayscale ultrasound images
+  num_classes: 4  # CN_ON, CN_OY, CY_ON, CY_OY
+
+model:
+  type: "unet2d"  # Match diffusers UNet2DModel
+  in_channels: 1
+  out_channels: 1
+  model_channels: 256  # Larger for 512px
+  attention_resolutions: [32, 16]  # Adjusted for 512px
+  num_res_blocks: 2
+  channel_mult: [1, 2, 4, 4, 8, 8]  # Match new DDPM architecture
+  num_heads: 8  # Increased for better performance
+  use_spatial_transformer: true
+  dropout: 0.1
+  attention_head_dim: 8
+
+diffusion:
+  beta_schedule: "linear"
+  beta_start: 0.0001
+  beta_end: 0.02
+  timesteps: 1000
+
+# DDRM specific parameters
+ddrm:
+  # Sampling parameters
+  sampling_steps: 50
+  eta: 0.85
+  etaB: 1.0
+
+  # Blind zone specific
+  noise_estimation:
+    method: "average_difference"  # CY_ON - CN_ON
+    regularization: 1e-6
+
+  degradation_estimation:
+    method: "least_squares"
+    threshold: 0.1  # For blind zone mask
+    regularization: 1e-6
+
+  # Data consistency
+  data_consistency:
+    weight: 1.0
+    frequency: 1  # Apply every step
+
+# Training parameters (for reference)
+training:
+  batch_size: 8  # Reduced for 512px
+  learning_rate: 1e-4
+  num_epochs: 200
+  gradient_accumulation_steps: 2
+  mixed_precision: "bf16"  # Better for A100
+
+  # Data paths
+  train_data_path: "/home/ubuntu/Desktop/JY/ultrasound_inp/diffusers/data/train_CN_CY_ALL"
+  output_dir: "/home/ubuntu/Desktop/JY/ultrasound_inp/diffusers/ddpm-ultrasound-512-a100"
+
+# Evaluation
+eval:
+  batch_size: 4  # Reduced for 512px
+  num_samples: 8
+  save_frequency: 20
+
+# Hardware
+device: "cuda"
+mixed_precision: "bf16"  # Better for A100
+gpu_memory_fraction: 0.95  # Use most of A100 80GB

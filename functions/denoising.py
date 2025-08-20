@@ -15,7 +15,12 @@ def efficient_generalized_steps(x, seq, model, b, H_funcs, y_0, sigma_0, etaB, e
         Sigma = torch.zeros(x.shape[1]*x.shape[2]*x.shape[3], device=x.device)
         Sigma[:singulars.shape[0]] = singulars
         U_t_y = H_funcs.Ut(y_0)
-        Sig_inv_U_t_y = U_t_y / singulars[:U_t_y.shape[-1]]
+
+        # Pad singulars to match U_t_y for division, and clamp to avoid div by zero
+        padded_singulars = torch.zeros(U_t_y.shape[1], device=U_t_y.device)
+        padded_singulars[:len(singulars)] = singulars
+        padded_singulars.clamp_min_(1e-6)
+        Sig_inv_U_t_y = U_t_y / padded_singulars
 
         #initialize x_T as given in the paper
         largest_alphas = compute_alpha(b, (torch.ones(x.size(0)) * seq[-1]).to(x.device).long())
@@ -51,12 +56,19 @@ def efficient_generalized_steps(x, seq, model, b, H_funcs, y_0, sigma_0, etaB, e
             xt = xs[-1].to('cuda')
             if cls_fn == None:
                 et = model(xt, t)
+                # Handle diffusers UNet2DOutput format
+                if hasattr(et, 'sample'):
+                    et = et.sample
             else:
                 et = model(xt, t, classes)
+                # Handle diffusers UNet2DOutput format
+                if hasattr(et, 'sample'):
+                    et = et.sample
                 et = et[:, :3]
                 et = et - (1 - at).sqrt()[0,0,0,0] * cls_fn(x,t,classes)
 
-            if et.size(1) == 6:
+            # Check output channels using .shape instead of .size()
+            if et.shape[1] == 6:
                 et = et[:, :3]
 
             x0_t = (xt - et * (1 - at).sqrt()) / at.sqrt()

@@ -13,4 +13,9 @@ datasets/test_CN
 outputs_noise_to_denoising
 final_mixed_training_model.pt
 best_model_phase2.pt
+datasets/test_CN_ON
+datasets/test_CN_OY
 datasets/test_CY_ON
+datasets/test_CY_OY
+datasets/train_CN_CY_ALL
+datasets/train_CN_CY
