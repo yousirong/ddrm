@@ -72,7 +72,7 @@ def parse_args_and_config():
         help="skip according to (uniform or quadratic)",
     )
     parser.add_argument(
-        "--timesteps", type=int, default=1000, help="number of steps involved"
+        "--timesteps", type=int, default=20, help="number of steps involved"
     )
     parser.add_argument(
         "--eta", type=float, default=0.85, help="Eta"
@@ -86,12 +86,40 @@ def parse_args_and_config():
     
     # Physics model strength parameters
     parser.add_argument(
-        "--distortion_factor", type=float, default=0.05, 
+        "--distortion_factor", type=float, default=0.025, 
         help="Distortion model strength factor (default: 0.05, original: 0.3)"
     )
     parser.add_argument(
-        "--noise_factor", type=float, default=0.02,
+        "--noise_factor", type=float, default=1.0,
         help="Noise factor for physics modeling (default: 0.02, original: 0.1)"
+    )
+    
+    # Step-wise image saving
+    parser.add_argument(
+        "--save_steps", type=str, default="",
+        help="Comma-separated list of steps to save intermediate images (e.g., '10,20,50,90')"
+    )
+    
+    # Version-specific threshold parameters
+    parser.add_argument(
+        "--threshold_v3", type=float, default=0.08,
+        help="Threshold for V3 blind zone detection (default: 0.08)"
+    )
+    parser.add_argument(
+        "--threshold_v4", type=float, default=0.10,
+        help="Threshold for V4 blind zone detection (default: 0.10)"
+    )
+    parser.add_argument(
+        "--threshold_v5", type=float, default=0.12,
+        help="Threshold for V5 blind zone detection (default: 0.12)"
+    )
+    parser.add_argument(
+        "--threshold_v6", type=float, default=0.15,
+        help="Threshold for V6 blind zone detection (default: 0.15)"
+    )
+    parser.add_argument(
+        "--threshold_v7", type=float, default=0.18,
+        help="Threshold for V7 blind zone detection (default: 0.18)"
     )
     
     # Enhanced ultrasound-specific arguments for DDRM
@@ -233,6 +261,13 @@ def main():
     logging.info(f"  - Sigma_0: {args.sigma_0}")
     logging.info(f"  - Distortion factor: {args.distortion_factor}")
     logging.info(f"  - Noise factor: {args.noise_factor}")
+    logging.info(f"  - Threshold V3: {args.threshold_v3}")
+    logging.info(f"  - Threshold V4: {args.threshold_v4}")
+    logging.info(f"  - Threshold V5: {args.threshold_v5}")
+    logging.info(f"  - Threshold V6: {args.threshold_v6}")
+    logging.info(f"  - Threshold V7: {args.threshold_v7}")
+    if args.save_steps:
+        logging.info(f"  - Save intermediate steps: {args.save_steps}")
 
     try:
         # Run enhanced ultrasound DDRM restoration

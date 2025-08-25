@@ -10,10 +10,12 @@ cd "$(dirname "$0")"
 #   ./run_ultrasound_ddrm.sh                    # Use default parameters
 #   DISTORTION_FACTOR=0.1 ./run_ultrasound_ddrm.sh  # Override distortion strength
 #   NOISE_FACTOR=0.05 ./run_ultrasound_ddrm.sh      # Override noise strength
+#   SAVE_STEPS="5,10,15" ./run_ultrasound_ddrm.sh   # Save intermediate steps 5, 10, 15
 #
 # To customize parameters, edit the values below or set environment variables:
-#   DISTORTION_FACTOR: Physics model distortion strength (default: 0.05, original: 0.3)
-#   NOISE_FACTOR: Physics model noise strength (default: 0.02, original: 0.1)
+#   DISTORTION_FACTOR: Physics model distortion strength (default: 0.025, original: 0.3)
+#   NOISE_FACTOR: Physics model noise strength (default: 0.01, original: 0.1)
+#   SAVE_STEPS: Comma-separated steps to save intermediate images (e.g., "5,10,15")
 
 echo "=== Enhanced Ultrasound DDRM Runner ==="
 echo "Physics-based blind zone modeling with V3-V7 version handling"
@@ -27,6 +29,22 @@ ETA=${ETA:-0.85}
 SIGMA_0=${SIGMA_0:-0.05}
 DISTORTION_FACTOR=${DISTORTION_FACTOR:-0.025}  # Physics model distortion strength (original: 0.3)
 NOISE_FACTOR=${NOISE_FACTOR:-0.01}            # Physics model noise strength (original: 0.1)
+SAVE_STEPS=${SAVE_STEPS:-""}                   # Comma-separated steps to save intermediate images (e.g., "5,10,15")
+
+
+# Version-specific blind zone detection thresholds
+# THRESHOLD_V3=${THRESHOLD_V3:-0.08}    # V3: Smaller blind zones, lower threshold
+# THRESHOLD_V4=${THRESHOLD_V4:-0.10}    # V4: Medium blind zones
+# THRESHOLD_V5=${THRESHOLD_V5:-0.12}    # V5: Medium-large blind zones
+# THRESHOLD_V6=${THRESHOLD_V6:-0.15}    # V6: Large blind zones
+# THRESHOLD_V7=${THRESHOLD_V7:-0.18}    # V7: Largest blind zones, higher threshold
+
+THRESHOLD_V3=${THRESHOLD_V3:-0.06}    # V3: Smaller blind zones, lower threshold
+THRESHOLD_V4=${THRESHOLD_V4:-0.08}    # V4: Medium blind zones
+THRESHOLD_V5=${THRESHOLD_V5:-0.09}    # V5: Medium-large blind zones
+THRESHOLD_V6=${THRESHOLD_V6:-0.12}    # V6: Large blind zones
+THRESHOLD_V7=${THRESHOLD_V7:-0.14}    # V7: Largest blind zones, higher threshold
+
 
 # Data paths - Based on actual dataset structure
 CN_ON_PATH="datasets/test_CN_ON"  # Path with CN_ON images for z_est estimation
@@ -108,6 +126,10 @@ echo "  - Eta: $ETA"
 echo "  - Sigma_0: $SIGMA_0"
 echo "  - Distortion factor: $DISTORTION_FACTOR"
 echo "  - Noise factor: $NOISE_FACTOR"
+echo "  - Thresholds: V3=$THRESHOLD_V3, V4=$THRESHOLD_V4, V5=$THRESHOLD_V5, V6=$THRESHOLD_V6, V7=$THRESHOLD_V7"
+if [ -n "$SAVE_STEPS" ]; then
+    echo "  - Save intermediate steps: $SAVE_STEPS"
+fi
 echo ""
 
 # Run the enhanced ultrasound DDRM
@@ -119,6 +141,12 @@ python ultrasound_main.py \
     --sigma_0 $SIGMA_0 \
     --distortion_factor $DISTORTION_FACTOR \
     --noise_factor $NOISE_FACTOR \
+    --threshold_v3 $THRESHOLD_V3 \
+    --threshold_v4 $THRESHOLD_V4 \
+    --threshold_v5 $THRESHOLD_V5 \
+    --threshold_v6 $THRESHOLD_V6 \
+    --threshold_v7 $THRESHOLD_V7 \
+    $([ -n "$SAVE_STEPS" ] && echo "--save_steps $SAVE_STEPS") \
     --cn_on_path $CN_ON_PATH \
     --cy_on_path $CY_ON_PATH \
     --cn_oy_path $CN_OY_PATH \

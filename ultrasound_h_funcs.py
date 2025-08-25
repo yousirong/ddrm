@@ -18,12 +18,14 @@ class UltrasoundBlindZone(H_functions):
     - Physics-based modeling: blind zone as physical distortion, not masking
     """
     
-    def __init__(self, channels, img_size, device, version=None, noise_pattern=None, distortion_factor=0.05, noise_factor=0.02):
+    def __init__(self, channels, img_size, device, version=None, noise_pattern=None, distortion_factor=0.025, noise_factor=1.0):
         self.channels = channels
         self.img_size = img_size
         self.device = device
         self.distortion_factor = distortion_factor
         self.noise_factor = noise_factor
+        
+        logger.info(f"*** UltrasoundBlindZone.__init__: distortion_factor={self.distortion_factor}, noise_factor={self.noise_factor} ***")
         self.version = version
         
         # Enhanced version-specific parameters based on blind zone physics
@@ -238,6 +240,7 @@ class UltrasoundBlindZone(H_functions):
             noise_expanded = self.noise_pattern.unsqueeze(0).unsqueeze(0).expand_as(distorted)
             
             # Add noise only where distortion occurs
+            logger.info(f"*** Applying noise_factor={self.noise_factor} in H function ***")
             distorted = distorted + noise_expanded * mask_expanded * self.noise_factor
             
             # Ensure output stays in reasonable range
@@ -278,7 +281,7 @@ class UltrasoundBlindZone(H_functions):
 # Using the main physics-based implementation from line 13
 
 
-def create_ultrasound_h_funcs(config, version=None, noise_pattern=None, distortion_factor=0.05, noise_factor=0.02):
+def create_ultrasound_h_funcs(config, version=None, noise_pattern=None, distortion_factor=0.025, noise_factor=1.0):
     """Factory function to create appropriate H_functions for ultrasound"""
     
     channels = getattr(config.data, 'channels', 1)
@@ -289,10 +292,11 @@ def create_ultrasound_h_funcs(config, version=None, noise_pattern=None, distorti
     logger.info(f"  - Distortion factor: {distortion_factor}")
     logger.info(f"  - Noise factor: {noise_factor}")
     logger.info(f"  - Noise pattern: {'provided' if noise_pattern is not None else 'default zeros'}")
+    logger.info(f"*** CREATING UltrasoundBlindZone with distortion_factor={distortion_factor}, noise_factor={noise_factor} ***")
     return UltrasoundBlindZone(channels, img_size, device, version, noise_pattern, distortion_factor, noise_factor)
 
 
-def estimate_version_artifacts(cn_on_path, cy_on_path, version):
+def estimate_version_artifacts(cn_on_path, cy_on_path, version, custom_threshold=None):
     """
     Enhanced structural noise estimation: z_est = Average(CY_ON - CN_ON)
     Implements version-specific (V3-V7) blind zone artifact estimation
@@ -368,6 +372,16 @@ def estimate_version_artifacts(cn_on_path, cy_on_path, version):
     if noise_patterns:
         z_est = np.mean(noise_patterns, axis=0)
         distortion_est = np.mean(distortion_maps, axis=0)
+        
+        # Apply custom threshold if provided
+        if custom_threshold is not None:
+            logger.info(f"Applying custom threshold {custom_threshold} for {version}")
+            # Only consider pixels where noise intensity exceeds threshold
+            noise_intensity = np.abs(z_est)
+            threshold_mask = noise_intensity > custom_threshold
+            z_est = z_est * threshold_mask.astype(np.float32)
+            distortion_est = distortion_est * threshold_mask.astype(np.float32)
+            logger.info(f"After threshold: {np.sum(threshold_mask)} pixels remain active")
         
         # Log version-specific statistics
         active_region = z_est[z_est != 0]

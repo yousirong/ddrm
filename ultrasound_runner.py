@@ -50,7 +50,22 @@ class UltrasoundDDRMRunner(Diffusion):
         self.version_artifacts = {}
         self.version_degradation_ops = {}
         
+        # Extract custom thresholds from args
+        self.custom_thresholds = {}
+        if hasattr(args, 'threshold_v3'):
+            self.custom_thresholds['V3'] = args.threshold_v3
+        if hasattr(args, 'threshold_v4'):
+            self.custom_thresholds['V4'] = args.threshold_v4
+        if hasattr(args, 'threshold_v5'):
+            self.custom_thresholds['V5'] = args.threshold_v5
+        if hasattr(args, 'threshold_v6'):
+            self.custom_thresholds['V6'] = args.threshold_v6
+        if hasattr(args, 'threshold_v7'):
+            self.custom_thresholds['V7'] = args.threshold_v7
+            
         logger.info("Initialized UltrasoundDDRMRunner with base DDRM framework")
+        if self.custom_thresholds:
+            logger.info(f"Custom thresholds: {self.custom_thresholds}")
         
     def estimate_ultrasound_artifacts(self, cn_on_path, cy_on_path, cn_oy_path=None, cy_oy_path=None):
         """
@@ -68,7 +83,8 @@ class UltrasoundDDRMRunner(Diffusion):
             logger.info(f"Processing {version}...")
             
             # Step 1: Structural noise estimation z_est
-            z_est, distortion_map = estimate_version_artifacts(cn_on_path, cy_on_path, version)
+            custom_threshold = self.custom_thresholds.get(version, None)
+            z_est, distortion_map = estimate_version_artifacts(cn_on_path, cy_on_path, version, custom_threshold)
             
             if z_est is not None:
                 self.version_artifacts[version] = {
@@ -111,17 +127,19 @@ class UltrasoundDDRMRunner(Diffusion):
                 logger.info("Using combined artifacts from all versions")
         
         # Get distortion and noise factors from args (with defaults)
-        distortion_factor = getattr(self.args, 'distortion_factor', 0.05)
-        noise_factor = getattr(self.args, 'noise_factor', 0.02)
+        distortion_factor = getattr(self.args, 'distortion_factor', 0.025)
+        noise_factor = getattr(self.args, 'noise_factor', 1.0)
         
         return create_ultrasound_h_funcs(self.config, version, noise_pattern, distortion_factor, noise_factor)
     
-    def sample_ultrasound_sequence(self, test_images_path, output_dir, sigma_0=0.05):
+    def sample_ultrasound_sequence(self, test_images_path, output_dir, sigma_0=0.05, save_steps=None):
         """
         Enhanced sampling sequence for ultrasound images
         Uses version-specific processing and physics-based modeling
         """
         logger.info("Starting ultrasound DDRM sampling...")
+        if save_steps:
+            logger.info(f"Will save intermediate steps: {save_steps}")
         
         # Load model (use base DDRM model loading)
         model = self._load_ddrm_model()
@@ -172,10 +190,39 @@ class UltrasoundDDRMRunner(Diffusion):
             # DDRM restoration using enhanced sampling
             x_T = torch.randn_like(x_orig)
             
+            # Create callback for saving intermediate steps
+            def save_step_callback(xt, step, x0_pred):
+                logger.info(f"Saving intermediate step {step} for {image_path.stem}")
+                # Save the denoised intermediate step
+                step_path = output_dir / f"{image_path.stem}_step_{step:03d}.png"
+                # Robust normalization for intermediate steps
+                if torch.abs(xt).max() > 5.0:
+                    # Apply robust normalization
+                    p1, p99 = torch.quantile(xt, torch.tensor([0.01, 0.99]))
+                    xt_norm = (xt - p1) / (p99 - p1 + 1e-8)
+                    xt_norm = xt_norm.clamp(0, 1)
+                else:
+                    xt_norm = xt.clamp(0, 1)
+                tvu.save_image(xt_norm.squeeze(), step_path)
+                logger.info(f"Saved intermediate step {step}: {step_path.name}")
+                
+                # Also save x0 prediction (current estimate of clean image)
+                if x0_pred is not None:
+                    x0_path = output_dir / f"{image_path.stem}_step_{step:03d}_x0.png"
+                    # Apply same normalization to x0 prediction
+                    if torch.abs(x0_pred).max() > 5.0:
+                        p1, p99 = torch.quantile(x0_pred, torch.tensor([0.01, 0.99]))
+                        x0_norm = (x0_pred - p1) / (p99 - p1 + 1e-8)
+                        x0_norm = x0_norm.clamp(0, 1)
+                    else:
+                        x0_norm = x0_pred.clamp(0, 1)
+                    tvu.save_image(x0_norm.squeeze(), x0_path)
+            
             # Use base DDRM sampling with ultrasound H_functions
             with torch.no_grad():
                 restored_sequence = self.sample_image_ultrasound(
-                    x_T, model, H_funcs, y_0, sigma_0, version=version
+                    x_T, model, H_funcs, y_0, sigma_0, version=version,
+                    save_steps=save_steps, save_callback=save_step_callback if save_steps else None
                 )
             
             # Save restored image (last in sequence)
@@ -233,7 +280,7 @@ class UltrasoundDDRMRunner(Diffusion):
         logger.info(f"Ultrasound DDRM sampling completed. Results saved to {output_dir}")
         return results
     
-    def sample_image_ultrasound(self, x, model, H_funcs, y_0, sigma_0, last=True, version=None):
+    def sample_image_ultrasound(self, x, model, H_funcs, y_0, sigma_0, last=True, version=None, save_steps=None, save_callback=None):
         """
         Enhanced DDRM sampling for ultrasound with physics-based corrections
         Uses base efficient_generalized_steps with ultrasound-specific H_functions
@@ -250,7 +297,9 @@ class UltrasoundDDRMRunner(Diffusion):
             etaA=self.args.eta, 
             etaC=self.args.eta,
             cls_fn=None, 
-            classes=None
+            classes=None,
+            save_steps=save_steps,
+            save_callback=save_callback
         )
         
         if last:
@@ -337,10 +386,20 @@ def run_ultrasound_ddrm(args, config):
     
     # Step 2: Process test images
     if hasattr(args, 'test_images_path'):
+        # Parse save_steps if provided
+        save_steps = None
+        if hasattr(args, 'save_steps') and args.save_steps:
+            try:
+                save_steps = [int(x.strip()) for x in args.save_steps.split(',')]
+                logger.info(f"Will save intermediate steps: {save_steps}")
+            except ValueError:
+                logger.warning(f"Invalid save_steps format: {args.save_steps}. Expected comma-separated integers.")
+        
         results = runner.sample_ultrasound_sequence(
             args.test_images_path, 
             args.image_folder,
-            sigma_0=getattr(args, 'sigma_0', 0.05)
+            sigma_0=getattr(args, 'sigma_0', 0.05),
+            save_steps=save_steps
         )
         
         logger.info(f"Processed {len(results)} images successfully")

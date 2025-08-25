@@ -32,12 +32,13 @@ except ImportError:
     logger.warning("Original DDRM components not available")
 
 class UltrasoundDDRM:
-    def __init__(self, config_path, model_path, device='cuda'):
+    def __init__(self, config_path, model_path, device='cuda', custom_thresholds=None):
         self.device = device
         self.config = self.load_config(config_path)
         self.model = self.load_model(model_path)
         self.noise_pattern = None
         self.degradation_operator = None
+        self.custom_thresholds = custom_thresholds or {}
         
     def load_config(self, config_path):
         """Load DDRM configuration"""
@@ -590,9 +591,13 @@ class UltrasoundDDRM:
         
         return version_images
     
-    def _get_version_threshold(self, version):
+    def _get_version_threshold(self, version, custom_thresholds=None):
         """Get version-specific threshold for blind zone detection"""
-        # Different versions may have different blind zone characteristics
+        # Use custom thresholds if provided, otherwise use defaults
+        if custom_thresholds and version in custom_thresholds:
+            return custom_thresholds[version]
+        
+        # Default version thresholds
         version_thresholds = {
             'V3': 0.08,  # Smaller blind zones, lower threshold
             'V4': 0.10,  # Medium blind zones
