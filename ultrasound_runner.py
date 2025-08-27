@@ -10,6 +10,12 @@ from pathlib import Path
 from PIL import Image
 from diffusers import UNet2DModel
 
+# Configure matplotlib for English fonts
+import matplotlib
+matplotlib.use('Agg')  # Use non-interactive backend
+matplotlib.rcParams['font.family'] = ['DejaVu Sans', 'Liberation Sans', 'sans-serif']
+matplotlib.rcParams['axes.unicode_minus'] = False
+
 # Import base DDRM components
 from runners.diffusion import Diffusion, get_beta_schedule
 from models.diffusion import Model
@@ -130,27 +136,83 @@ class UltrasoundDDRMRunner(Diffusion):
         distortion_factor = getattr(self.args, 'distortion_factor', 0.025)
         noise_factor = getattr(self.args, 'noise_factor', 1.0)
         
-        return create_ultrasound_h_funcs(self.config, version, noise_pattern, distortion_factor, noise_factor)
+        # Get V3~V7 도넛 기반 파라미터들
+        version_thresholds = {}
+        if hasattr(self.args, 'v3_tissue_percentile'):
+            version_thresholds['V3'] = {
+                'tissue_percentile': self.args.v3_tissue_percentile,
+                'blind_zone_percentile': getattr(self.args, 'v3_blind_zone_percentile', 35)
+            }
+        if hasattr(self.args, 'v4_tissue_percentile'):
+            version_thresholds['V4'] = {
+                'tissue_percentile': self.args.v4_tissue_percentile,
+                'blind_zone_percentile': getattr(self.args, 'v4_blind_zone_percentile', 40)
+            }
+        if hasattr(self.args, 'v5_tissue_percentile'):
+            version_thresholds['V5'] = {
+                'tissue_percentile': self.args.v5_tissue_percentile,
+                'blind_zone_percentile': getattr(self.args, 'v5_blind_zone_percentile', 45)
+            }
+        if hasattr(self.args, 'v6_tissue_percentile'):
+            version_thresholds['V6'] = {
+                'tissue_percentile': self.args.v6_tissue_percentile,
+                'blind_zone_percentile': getattr(self.args, 'v6_blind_zone_percentile', 50)
+            }
+        if hasattr(self.args, 'v7_tissue_percentile'):
+            version_thresholds['V7'] = {
+                'tissue_percentile': self.args.v7_tissue_percentile,
+                'blind_zone_percentile': getattr(self.args, 'v7_blind_zone_percentile', 55)
+            }
+        
+        # Get mask cleaning parameters
+        tissue_min_size = getattr(self.args, 'tissue_min_size', 200)
+        blind_zone_min_size = getattr(self.args, 'blind_zone_min_size', 100)
+        
+        # Get other enhanced detection parameters
+        enhanced_tissue_detection = getattr(self.args, 'enhanced_tissue_detection', True)
+        tissue_detection_mode = getattr(self.args, 'tissue_detection_mode', 'multi')
+        clahe_clip_limit = getattr(self.args, 'clahe_clip_limit', 3.0)
+        min_tissue_size_factor = getattr(self.args, 'min_tissue_size_factor', 1.0)
+        complete_blind_zone_removal = getattr(self.args, 'complete_blind_zone_removal', True)
+        preserve_background = getattr(self.args, 'preserve_background', True)
+        
+        return create_ultrasound_h_funcs(
+            self.config, version, noise_pattern, distortion_factor, noise_factor,
+            enhanced_tissue_detection, tissue_detection_mode, clahe_clip_limit,
+            min_tissue_size_factor, complete_blind_zone_removal, preserve_background,
+            version_thresholds, tissue_min_size, blind_zone_min_size
+        )
     
-    def sample_ultrasound_sequence(self, test_images_path, output_dir, sigma_0=0.05, save_steps=None):
+    def sample_ultrasound_sequence(self, test_images_path, output_dir, sigma_0=0.05, save_steps=None, optuna_mode=False, no_save_images=False):
         """
         Enhanced sampling sequence for ultrasound images
         Uses version-specific processing and physics-based modeling
         """
         logger.info("Starting ultrasound DDRM sampling...")
-        if save_steps:
+        if optuna_mode:
+            logger.info("Optuna mode enabled - using memory-only evaluation")
+        if no_save_images:
+            logger.info("Image saving disabled")
+        if save_steps and not no_save_images:
             logger.info(f"Will save intermediate steps: {save_steps}")
         
         # Load model (use base DDRM model loading)
         model = self._load_ddrm_model()
         
-        # Create output directory
+        # Create output directory (only if saving images)
         output_dir = Path(output_dir)
-        output_dir.mkdir(parents=True, exist_ok=True)
+        if not no_save_images:
+            output_dir.mkdir(parents=True, exist_ok=True)
         
-        # Load test images
-        test_images = self._load_test_images(test_images_path)
-        logger.info(f"Loaded {len(test_images)} test images")
+        # Create temporary directory for Optuna mode
+        temp_dir = None
+        if optuna_mode:
+            temp_dir = Path(output_dir).parent / "temp_optuna_results"
+            temp_dir.mkdir(exist_ok=True)
+        
+        # Load test images (Optuna 모드에서는 10개만)
+        test_images = self._load_test_images(test_images_path, optuna_mode)
+        logger.info(f"Loaded {len(test_images)} test images{' (Optuna mode - 10 images only)' if optuna_mode else ''}")
         
         # Process each image with version-specific handling
         results = []
@@ -179,50 +241,60 @@ class UltrasoundDDRMRunner(Diffusion):
             # Compute pseudo-inverse for initialization  
             pinv_y_0 = H_funcs.H_pinv(y_0)
             
-            # Save degraded image
-            degraded_path = output_dir / f"{image_path.stem}_degraded.png"
-            tvu.save_image(y_0.squeeze(), degraded_path)
+            # 조직 분석 시각화 저장 (Optuna 모드에서는 생략)
+            if not no_save_images:
+                self._save_tissue_analysis(x_orig, y_0, version, image_path, output_dir, H_funcs)
             
-            # Save original
-            orig_path = output_dir / f"{image_path.stem}_original.png"
-            tvu.save_image(x_orig.squeeze(), orig_path)
+            # Save degraded image (Optuna 모드에서는 생략)
+            degraded_path = None
+            if not no_save_images:
+                degraded_path = output_dir / f"{image_path.stem}_degraded.png"
+                tvu.save_image(y_0.squeeze(), degraded_path)
+            
+            # Save original (Optuna 모드에서는 생략)
+            orig_path = None
+            if not no_save_images:
+                orig_path = output_dir / f"{image_path.stem}_original.png"
+                tvu.save_image(x_orig.squeeze(), orig_path)
             
             # DDRM restoration using enhanced sampling
             x_T = torch.randn_like(x_orig)
             
-            # Create callback for saving intermediate steps
+            # Create callback for saving intermediate steps (only if not in no_save_images mode)
             def save_step_callback(xt, step, x0_pred):
-                logger.info(f"Saving intermediate step {step} for {image_path.stem}")
-                # Save the denoised intermediate step
-                step_path = output_dir / f"{image_path.stem}_step_{step:03d}.png"
-                # Robust normalization for intermediate steps
-                if torch.abs(xt).max() > 5.0:
-                    # Apply robust normalization
-                    p1, p99 = torch.quantile(xt, torch.tensor([0.01, 0.99]))
-                    xt_norm = (xt - p1) / (p99 - p1 + 1e-8)
-                    xt_norm = xt_norm.clamp(0, 1)
-                else:
-                    xt_norm = xt.clamp(0, 1)
-                tvu.save_image(xt_norm.squeeze(), step_path)
-                logger.info(f"Saved intermediate step {step}: {step_path.name}")
-                
-                # Also save x0 prediction (current estimate of clean image)
-                if x0_pred is not None:
-                    x0_path = output_dir / f"{image_path.stem}_step_{step:03d}_x0.png"
-                    # Apply same normalization to x0 prediction
-                    if torch.abs(x0_pred).max() > 5.0:
-                        p1, p99 = torch.quantile(x0_pred, torch.tensor([0.01, 0.99]))
-                        x0_norm = (x0_pred - p1) / (p99 - p1 + 1e-8)
-                        x0_norm = x0_norm.clamp(0, 1)
+                if not no_save_images:
+                    logger.info(f"Saving intermediate step {step} for {image_path.stem}")
+                    # Save the denoised intermediate step
+                    step_path = output_dir / f"{image_path.stem}_step_{step:03d}.png"
+                    # Robust normalization for intermediate steps
+                    if torch.abs(xt).max() > 5.0:
+                        # Apply robust normalization
+                        p1, p99 = torch.quantile(xt, torch.tensor([0.01, 0.99]))
+                        xt_norm = (xt - p1) / (p99 - p1 + 1e-8)
+                        xt_norm = xt_norm.clamp(0, 1)
                     else:
-                        x0_norm = x0_pred.clamp(0, 1)
-                    tvu.save_image(x0_norm.squeeze(), x0_path)
+                        xt_norm = xt.clamp(0, 1)
+                    tvu.save_image(xt_norm.squeeze(), step_path)
+                    logger.info(f"Saved intermediate step {step}: {step_path.name}")
+                    
+                    # Also save x0 prediction (current estimate of clean image)
+                    if x0_pred is not None:
+                        x0_path = output_dir / f"{image_path.stem}_step_{step:03d}_x0.png"
+                        # Apply same normalization to x0 prediction
+                        if torch.abs(x0_pred).max() > 5.0:
+                            p1, p99 = torch.quantile(x0_pred, torch.tensor([0.01, 0.99]))
+                            x0_norm = (x0_pred - p1) / (p99 - p1 + 1e-8)
+                            x0_norm = x0_norm.clamp(0, 1)
+                        else:
+                            x0_norm = x0_pred.clamp(0, 1)
+                        tvu.save_image(x0_norm.squeeze(), x0_path)
             
             # Use base DDRM sampling with ultrasound H_functions
             with torch.no_grad():
                 restored_sequence = self.sample_image_ultrasound(
                     x_T, model, H_funcs, y_0, sigma_0, version=version,
-                    save_steps=save_steps, save_callback=save_step_callback if save_steps else None
+                    save_steps=save_steps if not no_save_images else None, 
+                    save_callback=save_step_callback if save_steps and not no_save_images else None
                 )
             
             # Save restored image (last in sequence)
@@ -255,27 +327,71 @@ class UltrasoundDDRMRunner(Diffusion):
                     # Already in [0, 1] range
                     restored_tensor = restored_cpu.clamp(0, 1)
                 
-                # Final adjustment - make sure image isn't too bright
-                if restored_tensor.mean() > 0.8:
-                    logger.warning(f"Image too bright (mean={restored_tensor.mean():.3f}), applying brightness correction")
-                    # Adjust brightness to match input range
-                    target_mean = min(0.4, x_orig.mean().cpu().item() * 1.5)  # Target slightly brighter than input
-                    current_mean = restored_tensor.mean()
-                    restored_tensor = restored_tensor * (target_mean / current_mean)
+                # Tissue-aware brightness correction
+                if hasattr(H_funcs, 'tissue_mask') and H_funcs.tissue_mask is not None:
+                    logger.info("Applying tissue-aware brightness correction")
+                    
+                    # Convert tissue mask to tensor
+                    tissue_mask_tensor = torch.from_numpy(H_funcs.tissue_mask).float()
+                    non_tissue_mask_tensor = 1.0 - tissue_mask_tensor
+                    
+                    # Original tissue and non-tissue means
+                    orig_tensor = x_orig.squeeze().cpu()
+                    orig_tissue_mean = (orig_tensor * tissue_mask_tensor).sum() / (tissue_mask_tensor.sum() + 1e-8)
+                    orig_non_tissue_mean = (orig_tensor * non_tissue_mask_tensor).sum() / (non_tissue_mask_tensor.sum() + 1e-8)
+                    
+                    # Current tissue and non-tissue means
+                    current_tissue_mean = (restored_tensor * tissue_mask_tensor).sum() / (tissue_mask_tensor.sum() + 1e-8)
+                    current_non_tissue_mean = (restored_tensor * non_tissue_mask_tensor).sum() / (non_tissue_mask_tensor.sum() + 1e-8)
+                    
+                    # Differential correction: tissue brighter, non-tissue darker
+                    tissue_target = min(0.8, orig_tissue_mean * 1.8)  # Tissue: keep bright (up to 80%)
+                    non_tissue_target = min(0.3, orig_non_tissue_mean * 0.8)  # Non-tissue: darker (max 30%)
+                    
+                    # Apply corrections
+                    if current_tissue_mean > 0.05:  # Avoid division by zero
+                        tissue_correction = tissue_target / current_tissue_mean
+                        restored_tensor = restored_tensor * (tissue_mask_tensor * tissue_correction + non_tissue_mask_tensor)
+                    
+                    if current_non_tissue_mean > 0.05:  # Avoid division by zero
+                        non_tissue_correction = non_tissue_target / current_non_tissue_mean
+                        restored_tensor = restored_tensor * (tissue_mask_tensor + non_tissue_mask_tensor * non_tissue_correction)
+                    
                     restored_tensor = restored_tensor.clamp(0, 1)
+                    
+                    logger.info(f"Tissue correction: {current_tissue_mean:.3f}→{tissue_target:.3f}, "
+                               f"Non-tissue correction: {current_non_tissue_mean:.3f}→{non_tissue_target:.3f}")
+                else:
+                    # Fallback: original brightness correction but less aggressive
+                    if restored_tensor.mean() > 0.9:  # Higher threshold
+                        logger.warning(f"Image too bright (mean={restored_tensor.mean():.3f}), applying gentle brightness correction")
+                        target_mean = min(0.7, x_orig.mean().cpu().item() * 1.8)  # Higher target
+                        current_mean = restored_tensor.mean()
+                        restored_tensor = restored_tensor * (target_mean / current_mean)
+                        restored_tensor = restored_tensor.clamp(0, 1)
                 
                 logger.info(f"Final image range: Min: {restored_tensor.min():.3f}, Max: {restored_tensor.max():.3f}, Mean: {restored_tensor.mean():.3f}")
                 
-                tvu.save_image(restored_tensor, restored_path)
+                # Save restored image to disk or temporary numpy file
+                restored_path = None
+                if not no_save_images:
+                    restored_path = output_dir / f"{image_path.stem}_restored_{version}.png"
+                    tvu.save_image(restored_tensor, restored_path)
+                    logger.info(f"Saved restored image: {restored_path}")
+                elif optuna_mode and temp_dir:
+                    # Save as numpy array for Optuna evaluation
+                    temp_name = f"{image_path.stem}_temp_{version}.npy"
+                    temp_path = temp_dir / temp_name
+                    np.save(temp_path, restored_tensor.numpy())
+                    logger.info(f"Saved temporary result for Optuna: {temp_path}")
                 
                 results.append({
                     'original_path': image_path,
                     'version': version,
                     'restored_path': restored_path,
-                    'degraded_path': degraded_path
+                    'degraded_path': degraded_path,
+                    'restored_tensor': restored_tensor if optuna_mode else None  # Keep tensor in memory for Optuna
                 })
-                
-                logger.info(f"Saved restored image: {restored_path}")
         
         logger.info(f"Ultrasound DDRM sampling completed. Results saved to {output_dir}")
         return results
@@ -290,7 +406,9 @@ class UltrasoundDDRMRunner(Diffusion):
         
         logger.info(f"Starting DDRM sampling with {len(seq)} timesteps for {version}")
         
-        # Use base DDRM sampling with ultrasound H_functions
+        # Basic DDRM sampling without tissue protection
+        
+        # Basic DDRM sampling
         x_sequence = efficient_generalized_steps(
             x, seq, model, self.betas, H_funcs, y_0, sigma_0,
             etaB=self.args.etaB, 
@@ -311,21 +429,49 @@ class UltrasoundDDRMRunner(Diffusion):
         model_path = "/home/ubuntu/Desktop/JY/ultrasound_inp/diffusers/ddpm-ultrasound-512-a100/best_model/unet"
         model = UNet2DModel.from_pretrained(model_path)
         model.to(self.device)
-        model = torch.nn.DataParallel(model)
+        model.eval()  # Set to evaluation mode
+        
+        # Don't use DataParallel if there's only one GPU or if it causes issues
+        if torch.cuda.device_count() > 1:
+            logger.info(f"Using DataParallel with {torch.cuda.device_count()} GPUs")
+            model = torch.nn.DataParallel(model)
+        else:
+            logger.info("Using single GPU, skipping DataParallel")
+            
         logger.info(f"Loaded UNet2DModel from: {model_path}")
         return model
     
-    def _load_test_images(self, test_path):
-        """Load test images with version detection"""
+    def _load_test_images(self, test_path, optuna_mode=False):
+        """Load test images with version detection - Optuna 모드에서는 10개만 로드"""
         test_path = Path(test_path)
         images = []
         
-        if test_path.is_file():
+        if optuna_mode:
+            # Optuna 모드: GT 패턴에 해당하는 10개 이미지만 로드
+            target_patterns = [
+                'CY_OY_PC_D000_V3_001.bmp', 'CY_OY_PC_D000_V3_201.bmp', 
+                'CY_OY_PC_D000_V4_001.bmp', 'CY_OY_PC_D000_V4_201.bmp',
+                'CY_OY_PC_D000_V5_001.bmp', 'CY_OY_PC_D000_V5_201.bmp',
+                'CY_OY_PC_D000_V6_001.bmp', 'CY_OY_PC_D000_V6_201.bmp',
+                'CY_OY_PC_D000_V7_001.bmp', 'CY_OY_PC_D000_V7_201.bmp'
+            ]
+            
+            for pattern in target_patterns:
+                img_path = test_path / pattern
+                if img_path.exists():
+                    img = Image.open(img_path).convert('L').resize((512, 512))
+                    images.append((img_path, img))
+                else:
+                    logger.warning(f"Optuna target image not found: {img_path}")
+            
+            logger.info(f"Optuna mode: Loaded {len(images)}/10 target images")
+            
+        elif test_path.is_file():
             # Single image
             img = Image.open(test_path).convert('L').resize((512, 512))
             images.append((test_path, img))
         else:
-            # Directory
+            # Directory - 모든 이미지 로드
             for ext in ['*.bmp', '*.png', '*.jpg', '*.jpeg']:
                 for img_path in test_path.glob(ext):
                     img = Image.open(img_path).convert('L').resize((512, 512))
@@ -353,6 +499,183 @@ class UltrasoundDDRMRunner(Diffusion):
             np.save(h_path, H_est)
         
         logger.info(f"Artifacts saved to {output_dir}")
+    
+    def _save_tissue_analysis(self, x_orig, y_corrupted, version, image_path, output_dir, H_funcs):
+        """
+        조직 보호 분석 시각화 저장
+        - 원본 이미지
+        - 조직 검출 마스크
+        - 블라인드존 마스크  
+        - 보호 영역 표시
+        """
+        try:
+            import matplotlib.pyplot as plt
+            from matplotlib.colors import LinearSegmentedColormap
+            
+            # 이미지를 numpy로 변환
+            orig_np = x_orig.squeeze().cpu().numpy()
+            
+            # 조직 마스크, 블라인드존 마스크 가져오기
+            if H_funcs.tissue_mask is None or H_funcs.blind_zone_processing_mask is None:
+                logger.warning("조직 마스크가 없어서 시각화를 건너뜀")
+                return
+                
+            tissue_mask = H_funcs.tissue_mask
+            blind_zone_mask = H_funcs.blind_zone_processing_mask
+            
+            # 전체 블라인드존 마스크 (원본)
+            full_blind_zone = (H_funcs.distortion_mask > 0.1).astype(np.float32)
+            
+            # 보호된 조직 영역 (조직 ∩ 전체블라인드존)
+            protected_tissue = tissue_mask * full_blind_zone
+            
+            # 3x4 subplot 생성
+            fig, axes = plt.subplots(3, 4, figsize=(20, 15))
+            fig.suptitle(f'Tissue Protection Analysis - {version} - {image_path.stem}', fontsize=16)
+            
+            # Row 1: 기본 이미지들
+            axes[0,0].imshow(orig_np, cmap='gray')
+            axes[0,0].set_title('Original Image')
+            axes[0,0].axis('off')
+            
+            axes[0,1].imshow(tissue_mask, cmap='Reds', alpha=0.8)
+            axes[0,1].imshow(orig_np, cmap='gray', alpha=0.5)
+            axes[0,1].set_title('Tissue Detection (Bright Regions)')
+            axes[0,1].axis('off')
+            
+            axes[0,2].imshow(full_blind_zone, cmap='Blues', alpha=0.8)
+            axes[0,2].imshow(orig_np, cmap='gray', alpha=0.5)
+            axes[0,2].set_title(f'{version} Full Blind Zone')
+            axes[0,2].axis('off')
+            
+            axes[0,3].imshow(protected_tissue, cmap='Greens', alpha=0.8)
+            axes[0,3].imshow(orig_np, cmap='gray', alpha=0.5)
+            axes[0,3].set_title('Protected Tissue Area')
+            axes[0,3].axis('off')
+            
+            # Row 2: 처리 영역들
+            axes[1,0].imshow(blind_zone_mask, cmap='Oranges', alpha=0.8)
+            axes[1,0].imshow(orig_np, cmap='gray', alpha=0.5)
+            axes[1,0].set_title('Pure Blind Zone (Strong Processing)')
+            axes[1,0].axis('off')
+            
+            # 배경 영역
+            background_mask = 1.0 - tissue_mask - blind_zone_mask
+            background_mask = np.clip(background_mask, 0, 1)
+            axes[1,1].imshow(background_mask, cmap='Greys', alpha=0.6)
+            axes[1,1].imshow(orig_np, cmap='gray', alpha=0.5)
+            axes[1,1].set_title('Background Region (Minimal Processing)')
+            axes[1,1].axis('off')
+            
+            # 처리 강도 맵
+            processing_strength = np.zeros_like(orig_np)
+            processing_strength += tissue_mask * 0.3  # 조직: 30% 강도
+            processing_strength += blind_zone_mask * 2.0  # 순수 블라인드존: 200% 강도
+            processing_strength += background_mask * 0.1  # 배경: 10% 강도
+            
+            im = axes[1,2].imshow(processing_strength, cmap='plasma', alpha=0.8)
+            axes[1,2].imshow(orig_np, cmap='gray', alpha=0.4)
+            axes[1,2].set_title('Processing Strength Map')
+            axes[1,2].axis('off')
+            plt.colorbar(im, ax=axes[1,2], shrink=0.6)
+            
+            # 기본 버전 정보
+            version_info = {
+                'V3': 'Large Blind Zone\nStrong Distortion',
+                'V4': 'Med-Large Blind Zone\nMedium Distortion', 
+                'V5': 'Medium Blind Zone\nStandard Distortion',
+                'V6': 'Small Blind Zone\nWeak Distortion',
+                'V7': 'Minimal Blind Zone\nFine Distortion'
+            }
+            
+            version_text = f"""{version} Characteristics:
+
+{version_info.get(version, 'Unknown Version')}
+
+Processing Method:
+✓ Tissue protection activated
+✓ Differential correction strength
+✓ Progressive processing"""
+            
+            axes[1,3].text(0.05, 0.95, version_text, transform=axes[1,3].transAxes,
+                          verticalalignment='top', fontsize=11,
+                          bbox=dict(boxstyle="round", facecolor='lightyellow', alpha=0.8))
+            axes[1,3].set_title(f'{version} Processing Info')
+            axes[1,3].axis('off')
+            
+            # 보호 전략 오버레이
+            combined_overlay = np.zeros((*orig_np.shape, 3))
+            combined_overlay[:,:,0] = tissue_mask * 0.7  # 빨간색: 조직 (보호)
+            combined_overlay[:,:,1] = blind_zone_mask * 0.7  # 초록색: 블라인드존 (제거)
+            combined_overlay[:,:,2] = protected_tissue * 0.9  # 파란색: 보호된 조직
+            
+            axes[2,0].imshow(orig_np, cmap='gray')
+            axes[2,0].imshow(combined_overlay, alpha=0.6)
+            axes[2,0].set_title('Strategy Overlay\nRed:Tissue Protection, Green:Blind Zone Removal')
+            axes[2,0].axis('off')
+            
+            # Row 3: 통계 및 정보
+            tissue_coverage = np.sum(tissue_mask) / tissue_mask.size * 100
+            blind_zone_coverage = np.sum(full_blind_zone) / full_blind_zone.size * 100
+            protected_coverage = np.sum(protected_tissue) / protected_tissue.size * 100
+            pure_blind_coverage = np.sum(blind_zone_mask) / blind_zone_mask.size * 100
+            
+            stats_text = f"""Tissue Protection Statistics:
+
+• Detected Tissue: {tissue_coverage:.1f}%
+• Full Blind Zone: {blind_zone_coverage:.1f}%
+• Protected Tissue: {protected_coverage:.1f}%
+• Pure Blind Zone: {pure_blind_coverage:.1f}%
+
+Processing Strategy:
+→ Tissue Area: 20-60% gentle correction
+→ Pure Blind Zone: 120-200% strong correction  
+→ Background Area: 10% minimal correction
+
+Protection Effect:
+→ Tissue Loss Prevention: {protected_coverage:.1f}%
+→ Blind Zone Removal: {pure_blind_coverage:.1f}%
+"""
+            
+            axes[2,1].text(0.05, 0.95, stats_text, transform=axes[2,1].transAxes, 
+                          verticalalignment='top', fontsize=11, 
+                          bbox=dict(boxstyle="round", facecolor='lightblue', alpha=0.8))
+            axes[2,1].set_title('Protection Statistics')
+            axes[2,1].axis('off')
+            
+            # 처리 강도 히스토그램
+            axes[2,2].hist(processing_strength.flatten(), bins=50, alpha=0.7, color='purple')
+            axes[2,2].set_title('Processing Strength Distribution')
+            axes[2,2].set_xlabel('Processing Strength')
+            axes[2,2].set_ylabel('Pixel Count')
+            
+            # 마스크 겹침 분석
+            overlap_data = {
+                'Tissue Only': np.sum((tissue_mask > 0.5) & (full_blind_zone == 0)),
+                'Blind Zone Only': np.sum((tissue_mask == 0) & (full_blind_zone > 0.5)), 
+                'Tissue+Blind Zone': np.sum((tissue_mask > 0.5) & (full_blind_zone > 0.5)),
+                'Background': np.sum((tissue_mask == 0) & (full_blind_zone == 0))
+            }
+            
+            axes[2,3].pie(overlap_data.values(), labels=overlap_data.keys(), autopct='%1.1f%%', startangle=90)
+            axes[2,3].set_title('Region Distribution')
+            
+            # 저장
+            analysis_path = output_dir / f"{image_path.stem}_tissue_analysis_{version}.png"
+            plt.tight_layout()
+            plt.savefig(analysis_path, dpi=150, bbox_inches='tight')
+            plt.close()
+            
+            logger.info(f"조직 분석 시각화 저장: {analysis_path}")
+            logger.info(f"  - 조직 보호: {protected_coverage:.1f}%, 블라인드존 제거: {pure_blind_coverage:.1f}%")
+            
+        except Exception as e:
+            logger.error(f"조직 분석 시각화 실패: {e}")
+            # 기본 마스크 저장으로 폴백
+            if hasattr(H_funcs, 'tissue_mask') and H_funcs.tissue_mask is not None:
+                tissue_path = output_dir / f"{image_path.stem}_tissue_mask_{version}.png"
+                tvu.save_image(torch.from_numpy(H_funcs.tissue_mask), tissue_path)
+                logger.info(f"기본 조직 마스크 저장: {tissue_path}")
 
 
 # Utility functions for standalone usage
@@ -399,7 +722,9 @@ def run_ultrasound_ddrm(args, config):
             args.test_images_path, 
             args.image_folder,
             sigma_0=getattr(args, 'sigma_0', 0.05),
-            save_steps=save_steps
+            save_steps=save_steps,
+            optuna_mode=getattr(args, 'optuna_mode', False),
+            no_save_images=getattr(args, 'no_save_images', False)
         )
         
         logger.info(f"Processed {len(results)} images successfully")

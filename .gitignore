@@ -21,3 +21,5 @@ datasets/train_CN_CY_ALL
 datasets/train_CN_CY
 outputs_ultrasound_ddrm_sigma0.05_0.025_0.01
 optimization_results
+outputs_ultrasound_ddrm_optuna
+outputs_ultrasound_ddrm_upgrade

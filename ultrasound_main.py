@@ -157,6 +157,107 @@ def parse_args_and_config():
         "--artifact_save_dir", type=str,
         help="Directory to save estimated artifacts (z_est, H_est)"
     )
+    
+    # Tissue protection features
+    parser.add_argument(
+        "--tissue_protection", action="store_true",
+        help="Enable tissue protection during denoising process"
+    )
+    parser.add_argument(
+        "--verbose_tissue", action="store_true",
+        help="Enable verbose tissue protection logging"
+    )
+    
+    # Enhanced tissue detection parameters
+    parser.add_argument(
+        "--enhanced_tissue_detection", action="store_true",
+        help="Use enhanced multi-method tissue detection"
+    )
+    parser.add_argument(
+        "--tissue_detection_mode", type=str, default="multi",
+        choices=["multi", "adaptive", "edge", "simple"],
+        help="Tissue detection method: multi (default), adaptive, edge, or simple"
+    )
+    parser.add_argument(
+        "--clahe_clip_limit", type=float, default=3.0,
+        help="CLAHE clip limit for contrast enhancement (default: 3.0)"
+    )
+    parser.add_argument(
+        "--min_tissue_size_factor", type=float, default=1.0,
+        help="Minimum tissue size threshold multiplier (default: 1.0)"
+    )
+    
+    # Blind zone and background processing control
+    parser.add_argument(
+        "--complete_blind_zone_removal", action="store_true",
+        help="Enable complete (black) removal of blind zones"
+    )
+    parser.add_argument(
+        "--preserve_background", action="store_true",
+        help="Preserve background areas unchanged"
+    )
+    
+    # V3~V7 Donut-based tissue/blind zone separation parameters
+    parser.add_argument(
+        "--v3_tissue_percentile", type=float, default=65,
+        help="V3 tissue separation threshold (percentile, default: 65)"
+    )
+    parser.add_argument(
+        "--v3_blind_zone_percentile", type=float, default=35,
+        help="V3 blind zone separation threshold (percentile, default: 35)"
+    )
+    parser.add_argument(
+        "--v4_tissue_percentile", type=float, default=70,
+        help="V4 tissue separation threshold (percentile, default: 70)"
+    )
+    parser.add_argument(
+        "--v4_blind_zone_percentile", type=float, default=40,
+        help="V4 blind zone separation threshold (percentile, default: 40)"
+    )
+    parser.add_argument(
+        "--v5_tissue_percentile", type=float, default=75,
+        help="V5 tissue separation threshold (percentile, default: 75)"
+    )
+    parser.add_argument(
+        "--v5_blind_zone_percentile", type=float, default=45,
+        help="V5 blind zone separation threshold (percentile, default: 45)"
+    )
+    parser.add_argument(
+        "--v6_tissue_percentile", type=float, default=80,
+        help="V6 tissue separation threshold (percentile, default: 80)"
+    )
+    parser.add_argument(
+        "--v6_blind_zone_percentile", type=float, default=50,
+        help="V6 blind zone separation threshold (percentile, default: 50)"
+    )
+    parser.add_argument(
+        "--v7_tissue_percentile", type=float, default=85,
+        help="V7 tissue separation threshold (percentile, default: 85)"
+    )
+    parser.add_argument(
+        "--v7_blind_zone_percentile", type=float, default=55,
+        help="V7 blind zone separation threshold (percentile, default: 55)"
+    )
+    
+    # Mask cleaning parameters
+    parser.add_argument(
+        "--tissue_min_size", type=int, default=200,
+        help="Minimum tissue region size in pixels (default: 200)"
+    )
+    parser.add_argument(
+        "--blind_zone_min_size", type=int, default=100,
+        help="Minimum blind zone region size in pixels (default: 100)"
+    )
+    
+    # Optuna optimization mode parameters
+    parser.add_argument(
+        "--optuna_mode", action="store_true",
+        help="Enable Optuna optimization mode (memory-only evaluation)"
+    )
+    parser.add_argument(
+        "--no_save_images", action="store_true", 
+        help="Disable saving images to disk (for Optuna optimization)"
+    )
 
     args = parser.parse_args()
     args.log_path = os.path.join(args.exp, "logs", args.doc)

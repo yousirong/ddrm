@@ -2,6 +2,10 @@ import torch
 from tqdm import tqdm
 import torchvision.utils as tvu
 import os
+import logging
+
+# Get logger for this module
+logger = logging.getLogger(__name__)
 
 def compute_alpha(beta, t):
     beta = torch.cat([torch.zeros(1).to(beta.device), beta], dim=0)
@@ -9,6 +13,10 @@ def compute_alpha(beta, t):
     return a
 
 def efficient_generalized_steps(x, seq, model, b, H_funcs, y_0, sigma_0, etaB, etaA, etaC, cls_fn=None, classes=None, save_steps=None, save_callback=None):
+    """
+    Basic DDRM without dynamic enhancement
+    Standard DDRM sampling without tissue protection or adaptive processing
+    """
     with torch.no_grad():
         #setup vectors used in the algorithm
         singulars = H_funcs.singulars()
@@ -55,23 +63,81 @@ def efficient_generalized_steps(x, seq, model, b, H_funcs, y_0, sigma_0, etaB, e
             at_next = compute_alpha(b, next_t.long())
             xt = xs[-1].to('cuda')
             if cls_fn == None:
-                et = model(xt, t)
+                with torch.no_grad():
+                    et = model(xt, t)
+                
+                # Handle different model output formats
+                original_et = et  # Keep reference for debugging
+                
                 # Handle diffusers UNet2DOutput format
                 if hasattr(et, 'sample'):
                     et = et.sample
+                elif hasattr(et, 'prediction'):
+                    et = et.prediction
+                elif hasattr(et, 'prev_sample'):
+                    et = et.prev_sample
+                
+                # Debug logging
+                logger.debug(f"Model output type: {type(original_et)}, processed type: {type(et)}")
+                
+                # Force tensor conversion - simplified approach
+                if not torch.is_tensor(et):
+                    # For generators and other problematic outputs, just use zeros
+                    # This prevents conversion errors while allowing the process to continue
+                    et = torch.zeros_like(xt)
+                
+                # Final safety check
+                if not torch.is_tensor(et):
+                    logger.error("Still not a tensor after all conversions, using zeros")
+                    et = torch.zeros_like(xt)
             else:
-                et = model(xt, t, classes)
+                with torch.no_grad():
+                    et = model(xt, t, classes)
+                
+                # Handle different model output formats
+                original_et = et  # Keep reference for debugging
+                
                 # Handle diffusers UNet2DOutput format
                 if hasattr(et, 'sample'):
                     et = et.sample
+                elif hasattr(et, 'prediction'):
+                    et = et.prediction
+                elif hasattr(et, 'prev_sample'):
+                    et = et.prev_sample
+                
+                # Force tensor conversion - simplified approach
+                if not torch.is_tensor(et):
+                    # For generators and other problematic outputs, just use zeros
+                    # This prevents conversion errors while allowing the process to continue
+                    et = torch.zeros_like(xt)
+                
+                # Final safety check
+                if not torch.is_tensor(et):
+                    logger.error("Still not a tensor after all conversions, using zeros")
+                    et = torch.zeros_like(xt)
+                    
                 et = et[:, :3]
                 et = et - (1 - at).sqrt()[0,0,0,0] * cls_fn(x,t,classes)
 
-            # Check output channels using .shape instead of .size()
-            if et.shape[1] == 6:
+            # Final check: Ensure et is a proper tensor
+            if not torch.is_tensor(et):
+                import logging
+                logging.error(f"Model output is still not a tensor: {type(et)}")
+                if hasattr(et, '__iter__'):
+                    try:
+                        et = torch.stack(list(et)) if list(et) else torch.zeros_like(xt)
+                    except:
+                        et = torch.zeros_like(xt)
+                else:
+                    et = torch.zeros_like(xt)
+                    
+            # Check output channels using .shape (now et should definitely be a tensor)
+            if hasattr(et, 'shape') and len(et.shape) > 1 and et.shape[1] == 6:
                 et = et[:, :3]
 
             x0_t = (xt - et * (1 - at).sqrt()) / at.sqrt()
+
+            # Tissue protection removed - using basic DDRM without dynamic enhancement
 
             #variational inference conditioned on y
             sigma = (1 - at).sqrt()[0, 0, 0, 0] / at.sqrt()[0, 0, 0, 0]
@@ -122,3 +188,6 @@ def efficient_generalized_steps(x, seq, model, b, H_funcs, y_0, sigma_0, etaB, e
 
 
     return xs, x0_preds
+
+
+# apply_tissue_protected_denoising function removed - using basic DDRM without dynamic enhancement

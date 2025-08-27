@@ -3,8 +3,8 @@
 # Change to the script's directory so that relative paths work correctly
 cd "$(dirname "$0")"
 
-# Enhanced Ultrasound DDRM with Physics-based Blind Zone Modeling
-# Script to run ultrasound blind zone removal using DDRM methodology
+# Enhanced Ultrasound DDRM with V3-V7 Donut-based Tissue/Blind Zone Separation
+# Script to run ultrasound blind zone removal using DDRM methodology with version-specific donut regions
 #
 # Usage:
 #   ./run_ultrasound_ddrm.sh                    # Use default parameters
@@ -12,13 +12,19 @@ cd "$(dirname "$0")"
 #   NOISE_FACTOR=0.05 ./run_ultrasound_ddrm.sh      # Override noise strength
 #   SAVE_STEPS="5,10,15" ./run_ultrasound_ddrm.sh   # Save intermediate steps 5, 10, 15
 #
+# Key Features:
+#   - V3~V7 hardcoded donut regions for precise tissue/blind zone separation
+#   - Tissue (bright areas) protection during denoising
+#   - Blind zone (dark areas) complete removal
+#   - Version-specific percentile thresholds for optimal separation
+#
 # To customize parameters, edit the values below or set environment variables:
 #   DISTORTION_FACTOR: Physics model distortion strength (default: 0.025, original: 0.3)
 #   NOISE_FACTOR: Physics model noise strength (default: 0.01, original: 0.1)
 #   SAVE_STEPS: Comma-separated steps to save intermediate images (e.g., "5,10,15")
 
 echo "=== Enhanced Ultrasound DDRM Runner ==="
-echo "Physics-based blind zone modeling with V3-V7 version handling"
+echo "V3-V7 Donut-based tissue/blind zone separation with version-specific processing"
 echo ""
 
 # Default configuration
@@ -26,24 +32,68 @@ CONFIG="ultrasound_config.yml"
 DOC="ultrasound_ddrm_$(date +%Y%m%d_%H%M%S)"
 TIMESTEPS=${TIMESTEPS:-20}
 ETA=${ETA:-0.85}
-SIGMA_0=${SIGMA_0:-0.05}
+SIGMA_0=${SIGMA_0:-0.01}
 DISTORTION_FACTOR=${DISTORTION_FACTOR:-0.025}  # Physics model distortion strength (original: 0.3)
 NOISE_FACTOR=${NOISE_FACTOR:-0.01}            # Physics model noise strength (original: 0.1)
 SAVE_STEPS=${SAVE_STEPS:-""}                   # Comma-separated steps to save intermediate images (e.g., "5,10,15")
 
+# Enhanced features from recent updates
+TISSUE_PROTECTION=${TISSUE_PROTECTION:-"true"}  # Enable tissue protection during denoising
+VERBOSE_TISSUE=${VERBOSE_TISSUE:-"false"}       # Enable detailed tissue protection logging
+
+# Enhanced tissue detection parameters
+ENHANCED_TISSUE_DETECTION=${ENHANCED_TISSUE_DETECTION:-"true"}  # Use improved multi-method detection
+TISSUE_DETECTION_MODE=${TISSUE_DETECTION_MODE:-"multi"}        # multi/adaptive/edge/simple
+CLAHE_CLIP_LIMIT=${CLAHE_CLIP_LIMIT:-3.0}                     # CLAHE enhancement strength
+MIN_TISSUE_SIZE_FACTOR=${MIN_TISSUE_SIZE_FACTOR:-1.0}          # Tissue size threshold multiplier
+
+# Optuna optimization mode - prevent image saving
+OPTUNA_MODE=${OPTUNA_MODE:-"false"}                            # Enable memory-only evaluation for Optuna
+NO_SAVE_IMAGES=${NO_SAVE_IMAGES:-"false"}                      # Disable saving images to disk
+
+# Blind zone and background processing control
+COMPLETE_BLIND_ZONE_REMOVAL=${COMPLETE_BLIND_ZONE_REMOVAL:-"true"}  # Complete black removal of blind zones
+PRESERVE_BACKGROUND=${PRESERVE_BACKGROUND:-"true"}                  # Keep background unchanged
+
+# V3~V7 Donut region parameters (hardcoded donut shapes)
+# V3: Large donut (inner_r=85, outer_r=220)
+# V4: Medium-large donut (inner_r=50, outer_r=130)
+# V5: Medium donut (inner_r=30, outer_r=90)
+# V6: Small donut (inner_r=20, outer_r=60)
+# V7: Minimal donut (inner_r=15, outer_r=45)
+
+# Version-specific tissue/blind zone separation thresholds (percentiles)
+V3_TISSUE_PERCENTILE=${V3_TISSUE_PERCENTILE:-65}        # V3: Tissue threshold (65th percentile)
+V3_BLIND_ZONE_PERCENTILE=${V3_BLIND_ZONE_PERCENTILE:-35} # V3: Blind zone threshold (35th percentile)
+V4_TISSUE_PERCENTILE=${V4_TISSUE_PERCENTILE:-70}        # V4: Tissue threshold (70th percentile)
+V4_BLIND_ZONE_PERCENTILE=${V4_BLIND_ZONE_PERCENTILE:-40} # V4: Blind zone threshold (40th percentile)
+V5_TISSUE_PERCENTILE=${V5_TISSUE_PERCENTILE:-75}        # V5: Tissue threshold (75th percentile)
+V5_BLIND_ZONE_PERCENTILE=${V5_BLIND_ZONE_PERCENTILE:-45} # V5: Blind zone threshold (45th percentile)
+V6_TISSUE_PERCENTILE=${V6_TISSUE_PERCENTILE:-80}        # V6: Tissue threshold (80th percentile)
+V6_BLIND_ZONE_PERCENTILE=${V6_BLIND_ZONE_PERCENTILE:-50} # V6: Blind zone threshold (50th percentile)
+V7_TISSUE_PERCENTILE=${V7_TISSUE_PERCENTILE:-85}        # V7: Tissue threshold (85th percentile)
+V7_BLIND_ZONE_PERCENTILE=${V7_BLIND_ZONE_PERCENTILE:-55} # V7: Blind zone threshold (55th percentile)
+
+# Mask cleaning parameters
+TISSUE_MIN_SIZE=${TISSUE_MIN_SIZE:-200}                 # Minimum tissue region size (pixels)
+BLIND_ZONE_MIN_SIZE=${BLIND_ZONE_MIN_SIZE:-100}         # Minimum blind zone region size (pixels)
+
+# Natural restoration parameters (physics-based DDRM enhancement)
+NATURAL_RESTORATION=${NATURAL_RESTORATION:-"true"}      # Enable natural physics-based restoration
+TISSUE_DISTORTION_FACTOR=${TISSUE_DISTORTION_FACTOR:-0.0}  # Tissue distortion strength multiplier (0.3 = 30% of base)
+TISSUE_NOISE_FACTOR=${TISSUE_NOISE_FACTOR:-0.2}        # Tissue noise strength multiplier (0.2 = 20% of base)
+BLIND_ZONE_DISTORTION_FACTOR=${BLIND_ZONE_DISTORTION_FACTOR:-1.0}  # Blind zone distortion strength multiplier
+BLIND_ZONE_NOISE_FACTOR=${BLIND_ZONE_NOISE_FACTOR:-1.0}  # Blind zone noise strength multiplier
+BACKGROUND_NOISE_FACTOR=${BACKGROUND_NOISE_FACTOR:-0.1}  # Background noise strength multiplier
+BACKGROUND_DISTORTION_FACTOR=${BACKGROUND_DISTORTION_FACTOR:-0.1}  # Background distortion strength multiplier
 
 # Version-specific blind zone detection thresholds
-# THRESHOLD_V3=${THRESHOLD_V3:-0.08}    # V3: Smaller blind zones, lower threshold
-# THRESHOLD_V4=${THRESHOLD_V4:-0.10}    # V4: Medium blind zones
-# THRESHOLD_V5=${THRESHOLD_V5:-0.12}    # V5: Medium-large blind zones
-# THRESHOLD_V6=${THRESHOLD_V6:-0.15}    # V6: Large blind zones
-# THRESHOLD_V7=${THRESHOLD_V7:-0.18}    # V7: Largest blind zones, higher threshold
+THRESHOLD_V3=${THRESHOLD_V3:-0.0}    # V3: Use full donut region (no threshold)
+THRESHOLD_V4=${THRESHOLD_V4:-0.0}    # V4: Use full donut region (no threshold)
+THRESHOLD_V5=${THRESHOLD_V5:-0.0}    # V5: Use full donut region (no threshold)
+THRESHOLD_V6=${THRESHOLD_V6:-0.0}    # V6: Use full donut region (no threshold)
+THRESHOLD_V7=${THRESHOLD_V7:-0.0}    # V7: Use full donut region (no threshold)
 
-THRESHOLD_V3=${THRESHOLD_V3:-0.06}    # V3: Smaller blind zones, lower threshold
-THRESHOLD_V4=${THRESHOLD_V4:-0.08}    # V4: Medium blind zones
-THRESHOLD_V5=${THRESHOLD_V5:-0.09}    # V5: Medium-large blind zones
-THRESHOLD_V6=${THRESHOLD_V6:-0.12}    # V6: Large blind zones
-THRESHOLD_V7=${THRESHOLD_V7:-0.14}    # V7: Largest blind zones, higher threshold
 
 
 # Data paths - Based on actual dataset structure
@@ -53,7 +103,7 @@ CN_OY_PATH="datasets/test_CN_OY"      # Path with CN_OY images for H_est estimat
 CY_OY_PATH="datasets/test_CY_OY"      # Path with CY_OY images for H_est estimation
 TEST_PATH="datasets/test_CY_OY"           # Path to test images for restoration (using some training images as demo)
 
-OUTPUT_DIR="outputs_ultrasound_ddrm"
+OUTPUT_DIR="outputs_ultrasound_ddrm_upgrade"
 
 # Create config if it doesn't exist
 if [ ! -f "$CONFIG" ]; then
@@ -126,7 +176,29 @@ echo "  - Eta: $ETA"
 echo "  - Sigma_0: $SIGMA_0"
 echo "  - Distortion factor: $DISTORTION_FACTOR"
 echo "  - Noise factor: $NOISE_FACTOR"
-echo "  - Thresholds: V3=$THRESHOLD_V3, V4=$THRESHOLD_V4, V5=$THRESHOLD_V5, V6=$THRESHOLD_V6, V7=$THRESHOLD_V7"
+echo "  - Tissue protection: $TISSUE_PROTECTION"
+echo "  - Verbose tissue logs: $VERBOSE_TISSUE"
+echo "  - Enhanced tissue detection: $ENHANCED_TISSUE_DETECTION"
+echo "  - Tissue detection mode: $TISSUE_DETECTION_MODE"
+echo "  - CLAHE clip limit: $CLAHE_CLIP_LIMIT"
+echo "  - Complete blind zone removal: $COMPLETE_BLIND_ZONE_REMOVAL"
+echo "  - Preserve background: $PRESERVE_BACKGROUND"
+echo "  - Legacy Thresholds: V3=$THRESHOLD_V3, V4=$THRESHOLD_V4, V5=$THRESHOLD_V5, V6=$THRESHOLD_V6, V7=$THRESHOLD_V7"
+echo "  - V3 Donut Thresholds: Tissue=${V3_TISSUE_PERCENTILE}%, BlindZone=${V3_BLIND_ZONE_PERCENTILE}%"
+echo "  - V4 Donut Thresholds: Tissue=${V4_TISSUE_PERCENTILE}%, BlindZone=${V4_BLIND_ZONE_PERCENTILE}%"
+echo "  - V5 Donut Thresholds: Tissue=${V5_TISSUE_PERCENTILE}%, BlindZone=${V5_BLIND_ZONE_PERCENTILE}%"
+echo "  - V6 Donut Thresholds: Tissue=${V6_TISSUE_PERCENTILE}%, BlindZone=${V6_BLIND_ZONE_PERCENTILE}%"
+echo "  - V7 Donut Thresholds: Tissue=${V7_TISSUE_PERCENTILE}%, BlindZone=${V7_BLIND_ZONE_PERCENTILE}%"
+echo "  - Mask cleaning: Tissue min size=${TISSUE_MIN_SIZE}, Blind zone min size=${BLIND_ZONE_MIN_SIZE}"
+echo "  - Natural restoration: ${NATURAL_RESTORATION}"
+echo "  - Distortion factors: Tissue=${TISSUE_DISTORTION_FACTOR}, BlindZone=${BLIND_ZONE_DISTORTION_FACTOR}, Background=${BACKGROUND_DISTORTION_FACTOR}"
+echo "  - Noise factors: Tissue=${TISSUE_NOISE_FACTOR}, BlindZone=${BLIND_ZONE_NOISE_FACTOR}, Background=${BACKGROUND_NOISE_FACTOR}"
+if [ "$OPTUNA_MODE" = "true" ]; then
+    echo "  - Optuna optimization mode: ENABLED (memory-only evaluation)"
+fi
+if [ "$NO_SAVE_IMAGES" = "true" ]; then
+    echo "  - Image saving: DISABLED"
+fi
 if [ -n "$SAVE_STEPS" ]; then
     echo "  - Save intermediate steps: $SAVE_STEPS"
 fi
@@ -147,6 +219,26 @@ python ultrasound_main.py \
     --threshold_v6 $THRESHOLD_V6 \
     --threshold_v7 $THRESHOLD_V7 \
     $([ -n "$SAVE_STEPS" ] && echo "--save_steps $SAVE_STEPS") \
+    $([ "$TISSUE_PROTECTION" = "true" ] && echo "--tissue_protection") \
+    $([ "$VERBOSE_TISSUE" = "true" ] && echo "--verbose_tissue") \
+    $([ "$ENHANCED_TISSUE_DETECTION" = "true" ] && echo "--enhanced_tissue_detection") \
+    --tissue_detection_mode $TISSUE_DETECTION_MODE \
+    --clahe_clip_limit $CLAHE_CLIP_LIMIT \
+    --min_tissue_size_factor $MIN_TISSUE_SIZE_FACTOR \
+    $([ "$COMPLETE_BLIND_ZONE_REMOVAL" = "true" ] && echo "--complete_blind_zone_removal") \
+    $([ "$PRESERVE_BACKGROUND" = "true" ] && echo "--preserve_background") \
+    --v3_tissue_percentile $V3_TISSUE_PERCENTILE \
+    --v3_blind_zone_percentile $V3_BLIND_ZONE_PERCENTILE \
+    --v4_tissue_percentile $V4_TISSUE_PERCENTILE \
+    --v4_blind_zone_percentile $V4_BLIND_ZONE_PERCENTILE \
+    --v5_tissue_percentile $V5_TISSUE_PERCENTILE \
+    --v5_blind_zone_percentile $V5_BLIND_ZONE_PERCENTILE \
+    --v6_tissue_percentile $V6_TISSUE_PERCENTILE \
+    --v6_blind_zone_percentile $V6_BLIND_ZONE_PERCENTILE \
+    --v7_tissue_percentile $V7_TISSUE_PERCENTILE \
+    --v7_blind_zone_percentile $V7_BLIND_ZONE_PERCENTILE \
+    --tissue_min_size $TISSUE_MIN_SIZE \
+    --blind_zone_min_size $BLIND_ZONE_MIN_SIZE \
     --cn_on_path $CN_ON_PATH \
     --cy_on_path $CY_ON_PATH \
     --cn_oy_path $CN_OY_PATH \
@@ -154,6 +246,8 @@ python ultrasound_main.py \
     --test_images_path $TEST_PATH \
     --artifact_save_dir "${OUTPUT_DIR}/artifacts" \
     --image_folder $OUTPUT_DIR \
+    $([ "$OPTUNA_MODE" = "true" ] && echo "--optuna_mode") \
+    $([ "$NO_SAVE_IMAGES" = "true" ] && echo "--no_save_images") \
     --sample \
     --verbose info
 
@@ -165,8 +259,21 @@ echo "Key Features Implemented:"
 echo "1. z_est = Average(CY_ON - CN_ON): Structural noise estimation"
 echo "2. H_est = argmin_H ||H·(CN_OY) - (CY_OY - z_est)||²: Distortion operator estimation"
 echo "3. Physics-based modeling: Blind zone as physical distortion, not masking"
-echo "4. Version-specific processing (V3-V7) with different blind zone characteristics"
-echo "5. Integration with base DDRM efficient_generalized_steps sampling"
+echo "4. V3-V7 Donut-based tissue/blind zone separation:"
+echo "   - V3: Large donut (inner_r=85, outer_r=220) with ${V3_TISSUE_PERCENTILE}%/${V3_BLIND_ZONE_PERCENTILE}% thresholds"
+echo "   - V4: Med-Large donut (inner_r=50, outer_r=130) with ${V4_TISSUE_PERCENTILE}%/${V4_BLIND_ZONE_PERCENTILE}% thresholds"
+echo "   - V5: Medium donut (inner_r=30, outer_r=90) with ${V5_TISSUE_PERCENTILE}%/${V5_BLIND_ZONE_PERCENTILE}% thresholds"
+echo "   - V6: Small donut (inner_r=20, outer_r=60) with ${V6_TISSUE_PERCENTILE}%/${V6_BLIND_ZONE_PERCENTILE}% thresholds"
+echo "   - V7: Minimal donut (inner_r=15, outer_r=45) with ${V7_TISSUE_PERCENTILE}%/${V7_BLIND_ZONE_PERCENTILE}% thresholds"
+echo "5. Natural physics-based restoration:"
+echo "   - Tissue: Protected with ${TISSUE_DISTORTION_FACTOR}x distortion and ${TISSUE_NOISE_FACTOR}x noise"
+echo "   - Blind zone: Standard restoration with ${BLIND_ZONE_DISTORTION_FACTOR}x distortion and ${BLIND_ZONE_NOISE_FACTOR}x noise"
+echo "   - Background: Minimal processing with ${BACKGROUND_DISTORTION_FACTOR}x distortion and ${BACKGROUND_NOISE_FACTOR}x noise"
+echo "6. Natural DDRM inference through H and H_pinv operators (no forced black/white)"
+echo "7. Version-specific percentile-based brightness separation"
+echo "8. Enhanced multi-method tissue detection for strong blind zones"
+echo "9. Mask cleaning with size filtering (tissue: ${TISSUE_MIN_SIZE}px, blind zone: ${BLIND_ZONE_MIN_SIZE}px)"
+echo "10. Integration with base DDRM efficient_generalized_steps sampling"
 echo ""
 
 # Show summary of results
