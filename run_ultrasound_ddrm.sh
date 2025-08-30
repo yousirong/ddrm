@@ -80,8 +80,8 @@ BLIND_ZONE_MIN_SIZE=${BLIND_ZONE_MIN_SIZE:-100}         # Minimum blind zone reg
 
 # Natural restoration parameters (physics-based DDRM enhancement)
 NATURAL_RESTORATION=${NATURAL_RESTORATION:-"true"}      # Enable natural physics-based restoration
-TISSUE_DISTORTION_FACTOR=${TISSUE_DISTORTION_FACTOR:-0.0}  # Tissue distortion strength multiplier (0.3 = 30% of base)
-TISSUE_NOISE_FACTOR=${TISSUE_NOISE_FACTOR:-0.2}        # Tissue noise strength multiplier (0.2 = 20% of base)
+TISSUE_DISTORTION_FACTOR=${TISSUE_DISTORTION_FACTOR:-0.1}  # Tissue distortion strength multiplier (0.3 = 30% of base)
+TISSUE_NOISE_FACTOR=${TISSUE_NOISE_FACTOR:-0.05}        # Tissue noise strength multiplier (0.2 = 20% of base)
 BLIND_ZONE_DISTORTION_FACTOR=${BLIND_ZONE_DISTORTION_FACTOR:-1.0}  # Blind zone distortion strength multiplier
 BLIND_ZONE_NOISE_FACTOR=${BLIND_ZONE_NOISE_FACTOR:-1.0}  # Blind zone noise strength multiplier
 BACKGROUND_NOISE_FACTOR=${BACKGROUND_NOISE_FACTOR:-0.1}  # Background noise strength multiplier

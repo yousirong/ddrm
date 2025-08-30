@@ -442,51 +442,150 @@ class UltrasoundDDRMRunner(Diffusion):
         if isinstance(tissue_mask, torch.Tensor):
             tissue_mask = tissue_mask.cpu().numpy()
         
-        # 복원된 이미지를 기본으로 사용 (모든 영역 보존)
-        enhanced_np = restored_np.copy()
-        tissue_region = tissue_mask > 0.1
+        # 조직 영역 통계 계산
+        tissue_pixels_original = original_np[tissue_mask > 0.1]
+        tissue_pixels_restored = restored_np[tissue_mask > 0.1]
         
-        if not np.any(tissue_region):
+        if len(tissue_pixels_original) == 0 or len(tissue_pixels_restored) == 0:
             logger.warning(f"{version} 조직 영역이 없어 후처리를 건너뜁니다")
             return restored_image
         
-        # 버전별 차등 percentile 임계값 (V3: 조직 많음 → 높은 임계값, V7: 조직 적음 → 낮은 임계값)
-        version_percentiles = {
-            'V3': 50,  # 대형 블라인드존: 상위 15%만 질감 보존
-            'V4': 50,  # 중대형 블라인드존: 상위 20%만 질감 보존
-            'V5': 50,  # 중형 블라인드존: 상위 25%만 질감 보존
-            'V6': 50,  # 소형 블라인드존: 상위 35%만 질감 보존
-            'V7': 50   # 최소형 블라인드존: 상위 45%만 질감 보존
+        # 버전별 자연스러운 블렌딩 파라미터 - 조직 밝기 완전 복원
+        natural_blend_params = {
+            'V3': {'base_strength': 0.7, 'gradient_factor': 0.4, 'strong_tissue_strength': 0.95},  # 대형 도넛
+            'V4': {'base_strength': 0.75, 'gradient_factor': 0.5, 'strong_tissue_strength': 0.96},  # 중대형 도넛
+            'V5': {'base_strength': 0.8, 'gradient_factor': 0.6, 'strong_tissue_strength': 0.97},  # 중형 도넛: 표준
+            'V6': {'base_strength': 0.85, 'gradient_factor': 0.7, 'strong_tissue_strength': 0.98},  # 소형 도넛
+            'V7': {'base_strength': 0.9, 'gradient_factor': 0.8, 'strong_tissue_strength': 0.99}   # 최소형 도넛: 거의 완전 복원
         }
         
-        # 버전별 percentile 임계값 사용 (기본값: V5)
-        percentile_threshold = version_percentiles.get(version, 75)
+        params = natural_blend_params.get(version, natural_blend_params['V5'])
+        base_strength = params['base_strength']
+        gradient_factor = params['gradient_factor']
+        strong_tissue_strength = params['strong_tissue_strength']
         
-        tissue_pixels = original_np[tissue_region]
-        strong_tissue_threshold = np.percentile(tissue_pixels, percentile_threshold)
-        strong_tissue_region = tissue_region & (original_np >= strong_tissue_threshold)
+        logger.info(f"{version} 자연스러운 조직 블렌딩: base_strength={base_strength}, gradient_factor={gradient_factor}, strong_tissue_strength={strong_tissue_strength}")
         
-        if np.any(strong_tissue_region):
-            # 버전별 percentile 이상 부분에 원본 픽셀값 분포 그대로 적용
-            enhanced_np[strong_tissue_region] = original_np[strong_tissue_region]
+        # 향상된 이미지 생성
+        enhanced_np = restored_np.copy()
+        
+        # 조직 마스크를 기반으로 적응적 블렌딩 강도 계산
+        tissue_blend_strength = tissue_mask * base_strength
+        
+        # 선별적 강한 조직 처리를 위해 adaptive_strength 변수 인스턴스화
+        adaptive_strength = tissue_blend_strength
+        
+        # 기본적으로는 복원된 이미지 사용 (약한 조직 영역은 그대로 유지)
+        tissue_region = tissue_mask > 0.1
+        
+        # 강한 조직 영역만 선별적으로 향상 (약한 조직은 복원 결과 그대로 유지)
+        if np.any(tissue_region):
+            # 조직 영역 내에서 픽셀 강도 분석
+            tissue_pixels = original_np[tissue_region]
             
-            strong_count = np.sum(strong_tissue_region)
-            total_tissue_count = np.sum(tissue_region)
-            preservation_percentage = 100 - percentile_threshold  # 보존되는 조직 비율
-            
-            logger.info(f"{version} {percentile_threshold}th percentile 이상 원본 픽셀값 직접 적용: {strong_count}/{total_tissue_count}개 픽셀 (임계값: {strong_tissue_threshold:.3f})")
-            logger.info(f"{version} 조직 질감 보존 비율: 상위 {preservation_percentage}% ({strong_count}개 픽셀)")
-            logger.info(f"{version} 나머지 모든 영역 완전 보존: {total_tissue_count - strong_count}개 조직 픽셀 + 비조직 영역 모두 복원 결과 유지")
-        else:
-            logger.info(f"{version} {percentile_threshold}th percentile 이상 강한 조직 없음 - 모든 영역을 복원 결과 그대로 유지")
+            if len(tissue_pixels) > 0:
+                # 85th percentile 이상만을 강한 조직으로 정의 (더 엄격한 기준)
+                strong_tissue_threshold = np.percentile(tissue_pixels, 85)
+                
+                # 강한 조직 영역 마스크 생성 (원본에서 실제로 밝은 부분만)
+                strong_tissue_region = tissue_region & (original_np >= strong_tissue_threshold)
+                
+                if np.any(strong_tissue_region):
+                    # 강한 조직 영역에 자연스러운 경계 블렌딩 적용
+                    try:
+                        from scipy import ndimage
+                        
+                        # 85th percentile 이상 강한 조직 마스크만 블러 처리
+                        smooth_strong_mask = ndimage.gaussian_filter(strong_tissue_region.astype(float), sigma=2.5)
+                        
+                        # 부드러운 블렌딩 강도 계산 (0~1 사이)
+                        smooth_blend_strength = smooth_strong_mask * strong_tissue_strength
+                        
+                        # 85th percentile 이상 영역만 선별적으로 블렌딩 적용 (나머지는 복원 결과 그대로 유지)
+                        strong_blend_mask = smooth_blend_strength > 0.05  # 임계값 이상만 처리
+                        enhanced_np[strong_blend_mask] = (
+                            smooth_blend_strength[strong_blend_mask] * original_np[strong_blend_mask] +
+                            (1 - smooth_blend_strength[strong_blend_mask]) * restored_np[strong_blend_mask]
+                        )
+                        
+                        strong_blend_count = np.sum(strong_blend_mask)
+                        total_tissue_count = np.sum(tissue_region)
+                        logger.info(f"{version} 85th percentile 선별적 블렌딩: {strong_blend_count}/{total_tissue_count}개 픽셀만 처리 (임계값: {strong_tissue_threshold:.3f})")
+                        logger.info(f"{version} 약한 조직 보존: {total_tissue_count - strong_blend_count}개 픽셀은 복원 결과 그대로 유지")
+                        
+                    except ImportError:
+                        # scipy가 없는 경우 기본 방식 사용
+                        enhanced_np[strong_tissue_region] = (
+                            strong_tissue_strength * original_np[strong_tissue_region] +
+                            (1 - strong_tissue_strength) * restored_np[strong_tissue_region]
+                        )
+                        logger.warning(f"{version} scipy 없음 - 기본 블렌딩 사용")
+                    
+                    # 조직이 원본에서 밝은데(흰색) 복원 결과가 어둡다면 강력한 밝기 보정
+                    original_strong_mean = np.mean(original_np[strong_tissue_region])
+                    enhanced_strong_mean = np.mean(enhanced_np[strong_tissue_region])
+                    
+                    # 더 민감한 밝기 보정 조건
+                    if original_strong_mean > 0.5 and enhanced_strong_mean < original_strong_mean * 0.85:
+                        # 강력한 밝기 보정 - 원본에 더 가깝게
+                        brightness_target = original_strong_mean * 0.95  # 원본의 95% 밝기를 목표
+                        enhanced_np[strong_tissue_region] = np.clip(
+                            np.maximum(enhanced_np[strong_tissue_region], brightness_target), 0, 1
+                        )
+                        logger.info(f"{version} 강력한 조직 밝기 보정: 원본평균={original_strong_mean:.3f}, 목표={brightness_target:.3f}")
+                    
+                    # 매우 밝은 조직(0.8 이상)에 대한 추가 처리 (부드러운 경계 유지)
+                    very_bright_tissue = strong_tissue_region & (original_np >= 0.8)
+                    if np.any(very_bright_tissue):
+                        try:
+                            # 매우 밝은 조직도 부드러운 경계로 처리
+                            smooth_very_bright = ndimage.gaussian_filter(very_bright_tissue.astype(float), sigma=1.5)
+                            very_bright_strength = smooth_very_bright * 0.98
+                            
+                            # 부드러운 블렌딩으로 매우 밝은 조직 처리
+                            very_bright_mask = very_bright_strength > 0.1
+                            enhanced_np[very_bright_mask] = (
+                                very_bright_strength[very_bright_mask] * original_np[very_bright_mask] +
+                                (1 - very_bright_strength[very_bright_mask]) * enhanced_np[very_bright_mask]
+                            )
+                            
+                            very_bright_count = np.sum(very_bright_tissue)
+                            logger.info(f"{version} 매우 밝은 조직 부드러운 복원: {very_bright_count}개 픽셀")
+                        except:
+                            # 기본 처리
+                            enhanced_np[very_bright_tissue] = original_np[very_bright_tissue] * 0.98 + enhanced_np[very_bright_tissue] * 0.02
+                            very_bright_count = np.sum(very_bright_tissue)
+                            logger.info(f"{version} 매우 밝은 조직 기본 복원: {very_bright_count}개 픽셀")
+                        
+                else:
+                    logger.info(f"{version} 강한 조직 없음 - 모든 조직을 복원 결과 그대로 유지")
+                    
+                    strong_count = np.sum(strong_tissue_region)
+                    total_tissue_count = np.sum(tissue_region)
+                    logger.info(f"{version} 선별적 강한 조직 복원: {strong_count}/{total_tissue_count}개 픽셀 (임계값: {strong_tissue_threshold:.3f}, 복원강도: {strong_tissue_strength:.2f})")
+                    logger.info(f"{version} 약한 조직 보존: {total_tissue_count - strong_count}개 픽셀은 복원 결과 유지")
         
-        logger.info(f"{version} 버전별 차등 처리: {percentile_threshold}th percentile 이상만 원본 픽셀값 직접 적용, 나머지 전부 복원 결과 유지")
+        # 비조직 영역도 복원 결과 완전 보존 (블러 제거)
+        logger.info(f"{version} 비조직 영역도 복원 결과 완전 보존 - 블러 제거")
+        logger.info(f"{version} 완전 선별적 처리: 85th percentile 이상 강한 조직만 0.8 블렌딩, 나머지 전부 복원 결과 유지")
         
         # 값 범위 클램핑
         enhanced_np = np.clip(enhanced_np, 0, 1)
         
+        # 결과 통계
+        original_tissue_mean = np.mean(tissue_pixels_original)
+        restored_tissue_mean = np.mean(tissue_pixels_restored)
+        enhanced_tissue_mean = np.mean(enhanced_np[tissue_mask > 0.1])
+        
+        logger.info(f"{version} 자연스러운 조직 블렌딩 결과:")
+        logger.info(f"  - 원본 조직 평균: {original_tissue_mean:.3f}")
+        logger.info(f"  - 복원 조직 평균: {restored_tissue_mean:.3f}")
+        logger.info(f"  - 블렌딩 조직 평균: {enhanced_tissue_mean:.3f}")
+        logger.info(f"  - 원본 접근도: {((enhanced_tissue_mean - restored_tissue_mean) / (original_tissue_mean - restored_tissue_mean + 1e-8) * 100):.1f}%")
+        
         # torch.Tensor로 변환하여 반환
         return torch.from_numpy(enhanced_np).float()
+    
     def _load_test_images(self, test_path, optuna_mode=False):
         """Load test images with version detection - Optuna 모드에서는 10개만 로드"""
         test_path = Path(test_path)
