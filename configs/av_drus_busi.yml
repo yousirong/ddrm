@@ -1,0 +1,70 @@
+# AV-DRUS Configuration for BUSI Dataset
+# Adaptive Variance Diffusion Restoration for Ultrasound
+
+data:
+  dataset: "BUSI"
+  image_size: 256
+  channels: 3
+  num_workers: 4
+  rescaled: true
+  random_flip: false
+
+model:
+  type: 'av_drus'
+  in_channels: 3
+  out_ch: 3
+  ch: 128
+  ch_mult: [1, 2, 2, 4]
+  num_res_blocks: 2
+  attn_resolutions: [16, 8]
+  dropout: 0.1
+  var_type: "adaptive"
+  condition_channels: 3  # DAS image channels
+  
+diffusion:
+  beta_schedule: "linear"
+  beta_start: 0.0001
+  beta_end: 0.02
+  num_diffusion_timesteps: 1000
+
+loss:
+  vlb_weight: 1.0
+  simple_weight: 0.1
+  variance_reg_weight: 0.01
+
+sampling:
+  batch_size: 4
+  last_only: True
+
+training:
+  batch_size: 8
+  n_epochs: 1000
+  learning_rate: 0.0001
+  weight_decay: 0.01
+  grad_clip: 1.0
+  
+  # Learning rate scheduling
+  lr_scheduler: "cosine"
+  lr_warmup_steps: 1000
+  
+  # Model checkpointing
+  save_freq: 50
+  sample_freq: 10
+  
+  # Optimizer settings
+  optimizer: "adamw"
+  beta1: 0.9
+  beta2: 0.999
+  eps: 1e-8
+
+ultrasound:
+  # Ultrasound-specific parameters
+  speckle_variance: 0.2
+  noise_level: 0.1
+  das_elements: 128
+  das_samples: 512
+  
+  # Signal processing
+  frequency: 7.5e6  # 7.5 MHz
+  sampling_rate: 40e6  # 40 MHz
+  speed_of_sound: 1540  # m/s

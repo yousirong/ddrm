@@ -5,6 +5,7 @@ import torchvision.transforms as transforms
 import torchvision.transforms.functional as F
 from datasets.celeba import CelebA
 from datasets.lsun import LSUN
+from datasets.busi_dataset import BUSIDataset, BUSIUltrasoundSimulation
 from torch.utils.data import Subset
 import numpy as np
 import torchvision
@@ -183,6 +184,26 @@ def get_dataset(args, config):
                 transforms.ToTensor()])
             )
             test_dataset = dataset
+            
+    elif config.data.dataset == "BUSI":
+        # BUSI Ultrasound Dataset
+        dataset = BUSIUltrasoundSimulation(
+            root=getattr(args, 'busi_path', '/home/ubuntu/Desktop/JY/PAADI/Dataset_BUSI_with_GT'),
+            split='train',
+            transform=None,  # Will be applied in data_transform
+            image_size=config.data.image_size,
+            noise_level=getattr(config, 'ultrasound', {}).get('noise_level', 0.1),
+            speckle_variance=getattr(config, 'ultrasound', {}).get('speckle_variance', 0.2)
+        )
+        
+        test_dataset = BUSIUltrasoundSimulation(
+            root=getattr(args, 'busi_path', '/home/ubuntu/Desktop/JY/PAADI/Dataset_BUSI_with_GT'),
+            split='test',
+            transform=None,  # Will be applied in data_transform
+            image_size=config.data.image_size,
+            noise_level=getattr(config, 'ultrasound', {}).get('noise_level', 0.1),
+            speckle_variance=getattr(config, 'ultrasound', {}).get('speckle_variance', 0.2)
+        )
     else:
         dataset, test_dataset = None, None
 
