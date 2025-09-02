@@ -32,17 +32,17 @@ CONFIG="ultrasound_config.yml"
 DOC="ultrasound_ddrm_$(date +%Y%m%d_%H%M%S)"
 TIMESTEPS=${TIMESTEPS:-20}
 ETA=${ETA:-0.85}
-SIGMA_0=${SIGMA_0:-0.01}
+SIGMA_0=${SIGMA_0:-0.005}
 DISTORTION_FACTOR=${DISTORTION_FACTOR:-0.025}  # Physics model distortion strength (original: 0.3)
 NOISE_FACTOR=${NOISE_FACTOR:-0.01}            # Physics model noise strength (original: 0.1)
 SAVE_STEPS=${SAVE_STEPS:-""}                   # Comma-separated steps to save intermediate images (e.g., "5,10,15")
 
 # Enhanced features from recent updates
-TISSUE_PROTECTION=${TISSUE_PROTECTION:-"true"}  # Enable tissue protection during denoising
+TISSUE_PROTECTION=${TISSUE_PROTECTION:-"false"}  # Disable tissue protection for full DDRM processing
 VERBOSE_TISSUE=${VERBOSE_TISSUE:-"false"}       # Enable detailed tissue protection logging
 
 # Enhanced tissue detection parameters
-ENHANCED_TISSUE_DETECTION=${ENHANCED_TISSUE_DETECTION:-"true"}  # Use improved multi-method detection
+ENHANCED_TISSUE_DETECTION=${ENHANCED_TISSUE_DETECTION:-"false"}  # Disable tissue detection for full DDRM processing
 TISSUE_DETECTION_MODE=${TISSUE_DETECTION_MODE:-"multi"}        # multi/adaptive/edge/simple
 CLAHE_CLIP_LIMIT=${CLAHE_CLIP_LIMIT:-3.0}                     # CLAHE enhancement strength
 MIN_TISSUE_SIZE_FACTOR=${MIN_TISSUE_SIZE_FACTOR:-1.0}          # Tissue size threshold multiplier
@@ -52,8 +52,8 @@ OPTUNA_MODE=${OPTUNA_MODE:-"false"}                            # Enable memory-o
 NO_SAVE_IMAGES=${NO_SAVE_IMAGES:-"false"}                      # Disable saving images to disk
 
 # Blind zone and background processing control
-COMPLETE_BLIND_ZONE_REMOVAL=${COMPLETE_BLIND_ZONE_REMOVAL:-"true"}  # Complete black removal of blind zones
-PRESERVE_BACKGROUND=${PRESERVE_BACKGROUND:-"true"}                  # Keep background unchanged
+COMPLETE_BLIND_ZONE_REMOVAL=${COMPLETE_BLIND_ZONE_REMOVAL:-"false"}  # Disable complete blind zone removal for full DDRM processing
+PRESERVE_BACKGROUND=${PRESERVE_BACKGROUND:-"false"}                  # Process background for full DDRM processing
 
 # V3~V7 Donut region parameters (hardcoded donut shapes)
 # V3: Large donut (inner_r=85, outer_r=220)
@@ -79,7 +79,7 @@ TISSUE_MIN_SIZE=${TISSUE_MIN_SIZE:-200}                 # Minimum tissue region 
 BLIND_ZONE_MIN_SIZE=${BLIND_ZONE_MIN_SIZE:-100}         # Minimum blind zone region size (pixels)
 
 # Natural restoration parameters (physics-based DDRM enhancement)
-NATURAL_RESTORATION=${NATURAL_RESTORATION:-"true"}      # Enable natural physics-based restoration
+NATURAL_RESTORATION=${NATURAL_RESTORATION:-"false"}      # Disable selective restoration for uniform DDRM processing
 TISSUE_DISTORTION_FACTOR=${TISSUE_DISTORTION_FACTOR:-0.1}  # Tissue distortion strength multiplier (0.3 = 30% of base)
 TISSUE_NOISE_FACTOR=${TISSUE_NOISE_FACTOR:-0.05}        # Tissue noise strength multiplier (0.2 = 20% of base)
 BLIND_ZONE_DISTORTION_FACTOR=${BLIND_ZONE_DISTORTION_FACTOR:-1.0}  # Blind zone distortion strength multiplier
