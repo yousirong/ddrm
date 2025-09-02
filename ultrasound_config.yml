@@ -1,5 +1,6 @@
 model:
   type: simple
+  model_path: /home/juneyonglee/Desktop/ultrasound_inp/diffusers/ddpm-ultrasound-512-a100/best_model/unet
   in_channels: 1
   out_ch: 1
   ch: 128

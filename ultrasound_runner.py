@@ -396,8 +396,8 @@ class UltrasoundDDRMRunner(Diffusion):
 
     def _load_ddrm_model(self):
         """Load DDRM model from user-specified diffusers path"""
-        model_path = "/home/ubuntu/Desktop/JY/ultrasound_inp/diffusers/ddpm-ultrasound-512-a100/best_model/unet"
-        model = UNet2DModel.from_pretrained(model_path)
+        model_path = "/home/juneyonglee/Desktop/ultrasound_inp/diffusers/ddpm-ultrasound-512-a100/best_model/unet"
+        model = UNet2DModel.from_pretrained(model_path, local_files_only=True)
         model.to(self.device)
         model.eval()  # Set to evaluation mode
 
