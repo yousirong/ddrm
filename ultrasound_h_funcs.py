@@ -953,53 +953,53 @@ class UltrasoundBlindZone(H_functions):
                 if hasattr(self, 'tissue_mask') and self.tissue_mask is not None and hasattr(self, 'original_image') and self.original_image is not None:
                     tissue_tensor = torch.from_numpy(self.tissue_mask).float().to(vec.device)
                     tissue_expanded = tissue_tensor.unsqueeze(0).unsqueeze(0)
-                    
+
                     original_tensor = torch.from_numpy(self.original_image).float().to(vec.device)
                     original_expanded = original_tensor.unsqueeze(0).unsqueeze(0)
 
                     # 자연스러운 블렌딩: 조직 마스크 강도에 따라 가변적 블렌딩
                     # 조직 마스크 값이 높을수록 원본에 더 가깝게
                     adaptive_blend_strength = tissue_expanded * 0.85  # 최대 85%까지 원본 반영
-                    
+
                     # 거리 기반 부드러운 블렌딩을 위한 가우시안 블러 적용
                     try:
                         import torch.nn.functional as F
                         # 블렌딩 강도를 부드럽게 만들기 위해 가우시안 블러
                         blur_kernel_size = 5
                         sigma = 1.5
-                        kernel = torch.tensor([[torch.exp(-((i-blur_kernel_size//2)**2 + (j-blur_kernel_size//2)**2)/(2*sigma**2)) 
+                        kernel = torch.tensor([[torch.exp(-((i-blur_kernel_size//2)**2 + (j-blur_kernel_size//2)**2)/(2*sigma**2))
                                               for j in range(blur_kernel_size)] for i in range(blur_kernel_size)], dtype=torch.float32)
                         kernel = kernel / kernel.sum()
                         kernel = kernel.unsqueeze(0).unsqueeze(0).to(vec.device)
-                        
+
                         # 패딩을 적용하여 블렌딩 강도를 부드럽게
                         adaptive_blend_smooth = F.conv2d(adaptive_blend_strength, kernel, padding=blur_kernel_size//2)
                         adaptive_blend_smooth = torch.clamp(adaptive_blend_smooth, 0.0, 1.0)
                     except:
                         # 블러 실패시 기본 블렌딩 사용
                         adaptive_blend_smooth = adaptive_blend_strength
-                    
+
                     # 자연스러운 블렌딩 적용
-                    blended_result = (original_expanded * adaptive_blend_smooth + 
+                    blended_result = (original_expanded * adaptive_blend_smooth +
                                     result * (1.0 - adaptive_blend_smooth))
-                    
+
                     # 조직 영역에만 블렌딩 적용
                     result = torch.where(tissue_expanded > 0.1, blended_result, result)
-                    
+
                     # 강한 조직(70% 이상) 영역에 대해 추가적인 원본 복원
                     if hasattr(self, 'strong_tissue_mask') and self.strong_tissue_mask is not None:
                         strong_tissue_tensor = torch.from_numpy(self.strong_tissue_mask).float().to(vec.device)
                         strong_tissue_expanded = strong_tissue_tensor.unsqueeze(0).unsqueeze(0)
-                        
+
                         # 강한 조직 영역: 원본 픽셀값 직접 복원 (98% 원본)
                         strong_blend_strength = 0.98
-                        strong_blended_result = (original_expanded * strong_blend_strength + 
+                        strong_blended_result = (original_expanded * strong_blend_strength +
                                                result * (1.0 - strong_blend_strength))
-                        
+
                         # 조직 밝기 보정 - 원본의 밝기 특성 완전 유지
                         original_tissue_mean = torch.mean(original_expanded * strong_tissue_expanded)
                         current_tissue_mean = torch.mean(strong_blended_result * strong_tissue_expanded)
-                        
+
                         # 더 민감한 밝기 보정
                         if original_tissue_mean > 0.5 and current_tissue_mean < original_tissue_mean * 0.9:
                             # 강력한 밝기 보정 - 원본에 훨씬 가깝게
@@ -1010,7 +1010,7 @@ class UltrasoundBlindZone(H_functions):
                                 torch.clamp(strong_blended_result + brightness_correction, 0.0, 1.0),
                                 strong_blended_result
                             )
-                        
+
                         # 매우 밝은 조직(0.8 이상)에 대한 완전 복원
                         very_bright_mask = (original_expanded >= 0.8) & (strong_tissue_expanded > 0.5)
                         if torch.any(very_bright_mask):
@@ -1020,10 +1020,10 @@ class UltrasoundBlindZone(H_functions):
                                 original_expanded * 0.99 + strong_blended_result * 0.01,
                                 strong_blended_result
                             )
-                        
+
                         # 강한 조직 영역에만 강력한 블렌딩 적용
                         result = torch.where(strong_tissue_expanded > 0.5, strong_blended_result, result)
-                
+
                 # 강한 조직 부분을 원본 픽셀값으로 직접 대체
                 if hasattr(self, '_original_restoration'):
                     result = self._original_restoration
@@ -1108,7 +1108,7 @@ def create_ultrasound_h_funcs(config, version=None, noise_pattern=None, distorti
 def estimate_version_artifacts(cn_on_path, cy_on_path, version, custom_threshold=None):
     """
     Enhanced structural noise estimation: z_est = Average(CY_ON - CN_ON)
-    Implements version-specific (V3-V7) blind zone artifact estimation
+    Implements version-specific (V3-V7) blind zone artifact estimation, excluding tissue regions.
     """
     logger.info(f"Estimating structural noise artifacts for version {version}")
 
@@ -1147,34 +1147,49 @@ def estimate_version_artifacts(cn_on_path, cy_on_path, version, custom_threshold
 
     # Version-specific processing parameters
     version_params = {
-        "V3": {"outer_r": 220, "inner_r": 85, "strength": 0.8},
-        "V4": {"outer_r": 130, "inner_r": 50, "strength": 0.9},
-        "V5": {"outer_r": 90, "inner_r": 30, "strength": 1.0},
-        "V6": {"outer_r": 60, "inner_r": 20, "strength": 1.1},
-        "V7": {"outer_r": 45, "inner_r": 15, "strength": 1.2}
+        "V3": {"outer_r": 220, "inner_r": 85, "strength": 0.8, "tissue_percentile": 75},
+        "V4": {"outer_r": 130, "inner_r": 50, "strength": 0.9, "tissue_percentile": 75},
+        "V5": {"outer_r": 90, "inner_r": 30, "strength": 1.0, "tissue_percentile": 75},
+        "V6": {"outer_r": 60, "inner_r": 20, "strength": 1.1, "tissue_percentile": 75},
+        "V7": {"outer_r": 45, "inner_r": 15, "strength": 1.2, "tissue_percentile": 75}
     }
 
-    params = version_params.get(version, {"outer_r": 100, "inner_r": 40, "strength": 1.0})
+    params = version_params.get(version, {"outer_r": 100, "inner_r": 40, "strength": 1.0, "tissue_percentile": 75})
 
     for cn_file, cy_file in zip(cn_files[:15], cy_files[:15]):  # Use more samples for robustness
         cn_img = np.array(Image.open(cn_file).convert('L').resize((512, 512))) / 255.0
         cy_img = np.array(Image.open(cy_file).convert('L').resize((512, 512))) / 255.0
 
-        # Compute structural noise: z = CY_ON - CN_ON
-        structural_noise = cy_img - cn_img
+        # 엡실론(나눗셈 오류 방지) 및 안정화 계수
+        epsilon = 1e-6
+        stabilization_factor = 0.01  # 안정화 계수
+        # CY_ON = M * CN_ON + z_est 모델 기반 z_est 추정
+        # 1. 곱셈 왜곡 M 추정: M = CY_ON / CN_ON
+        multiplicative_map = np.divide(cy_img, cn_img + epsilon)
+        multiplicative_map = np.clip(multiplicative_map, 0.1, 5.0)  # 극단값 제한
 
+        # 2. z_est 추정: z_est = CY_ON - M * CN_ON
+        # structural_noise = (cy_img - multiplicative_map * cn_img)
         # Create version-specific region mask for focused estimation
         y, x = np.ogrid[:512, :512]
         center_y, center_x = 256, 256
         distance = np.sqrt((x - center_x)**2 + (y - center_y)**2)
         region_mask = ((distance >= params["inner_r"]) & (distance <= params["outer_r"])).astype(np.float32)
 
-        # Apply region mask to focus on blind zone
-        focused_noise = structural_noise * region_mask
+        # Detect and exclude tissue from z_est
+        donut_pixels = cy_img[region_mask > 0.5]
+        if len(donut_pixels) > 0:
+            tissue_threshold = np.percentile(donut_pixels, params['tissue_percentile'])
+            tissue_mask = ((cy_img >= tissue_threshold) & (region_mask > 0.5)).astype(np.float32)
+        else:
+            tissue_mask = np.zeros_like(cy_img)
+
+        # Apply region mask and tissue exclusion to focus on blind zone noise
+        focused_noise = structural_noise * region_mask * (1.0 - tissue_mask)
         noise_patterns.append(focused_noise)
 
         # Estimate distortion strength map
-        distortion_strength = np.abs(structural_noise) * region_mask
+        distortion_strength = np.abs(structural_noise) * region_mask * (1.0 - tissue_mask)
         distortion_maps.append(distortion_strength)
 
     # Compute average structural noise pattern z_est
@@ -1197,7 +1212,7 @@ def estimate_version_artifacts(cn_on_path, cy_on_path, version, custom_threshold
         # Log version-specific statistics
         active_region = z_est[z_est != 0]
         if len(active_region) > 0:
-            logger.info(f"{version} structural noise z_est stats:")
+            logger.info(f"{version} structural noise z_est stats (tissue excluded):")
             logger.info(f"  - Mean: {np.mean(active_region):.4f}, Std: {np.std(active_region):.4f}")
             logger.info(f"  - Min: {np.min(active_region):.4f}, Max: {np.max(active_region):.4f}")
             logger.info(f"  - Coverage: {len(active_region) / (512*512) * 100:.2f}%")
@@ -1211,7 +1226,7 @@ def estimate_version_artifacts(cn_on_path, cy_on_path, version, custom_threshold
 def estimate_degradation_operator(cn_oy_path, cy_oy_path, z_est, version):
     """
     Enhanced degradation operator estimation:
-    H_est = argmin_H ||H·(CN_OY) - (CY_OY - z_est)||²
+    H_est = argmin_H ||H·(CN_OY) - (CY_OY - z_est)||², excluding tissue regions.
     """
     logger.info(f"Estimating degradation operator H_est for version {version}")
 
@@ -1250,6 +1265,15 @@ def estimate_degradation_operator(cn_oy_path, cy_oy_path, z_est, version):
     # Solve for H: minimize ||H·(CN_OY) - (CY_OY - z_est)||²
     h_estimates = []
 
+    version_params = {
+        "V3": {"outer_r": 220, "inner_r": 85, "tissue_percentile": 75},
+        "V4": {"outer_r": 130, "inner_r": 50, "tissue_percentile": 75},
+        "V5": {"outer_r": 90, "inner_r": 30, "tissue_percentile": 75},
+        "V6": {"outer_r": 60, "inner_r": 20, "tissue_percentile": 75},
+        "V7": {"outer_r": 45, "inner_r": 15, "tissue_percentile": 75}
+    }
+    params = version_params.get(version, {"outer_r": 100, "inner_r": 40, "tissue_percentile": 75})
+
     for cn_file, cy_file in zip(cn_oy_files[:10], cy_oy_files[:10]):
         cn_oy = np.array(Image.open(cn_file).convert('L').resize((512, 512))) / 255.0
         cy_oy = np.array(Image.open(cy_file).convert('L').resize((512, 512))) / 255.0
@@ -1258,9 +1282,20 @@ def estimate_degradation_operator(cn_oy_path, cy_oy_path, z_est, version):
         cy_corrected = cy_oy - z_est
 
         # Solve H·cn_oy ≈ cy_corrected
-        # For pixel-wise operation: H[i,j] = cy_corrected[i,j] / (cn_oy[i,j] + eps)
         eps = 1e-6
         h_estimate = np.divide(cy_corrected, cn_oy + eps, out=np.zeros_like(cy_corrected), where=(cn_oy + eps) != 0)
+
+        # Detect and exclude tissue from H_est
+        y, x = np.ogrid[:512, :512]
+        center_y, center_x = 256, 256
+        distance = np.sqrt((x - center_x)**2 + (y - center_y)**2)
+        region_mask = ((distance >= params["inner_r"]) & (distance <= params["outer_r"])).astype(np.float32)
+
+        donut_pixels = cy_oy[region_mask > 0.5]
+        if len(donut_pixels) > 0:
+            tissue_threshold = np.percentile(donut_pixels, params['tissue_percentile'])
+            tissue_mask = ((cy_oy >= tissue_threshold) & (region_mask > 0.5)).astype(np.float32)
+            h_estimate[tissue_mask > 0.5] = 1.0 # Set H to identity for tissue
 
         # Regularize extreme values
         h_estimate = np.clip(h_estimate, 0.1, 3.0)
@@ -1268,7 +1303,7 @@ def estimate_degradation_operator(cn_oy_path, cy_oy_path, z_est, version):
 
     if h_estimates:
         H_est = np.mean(h_estimates, axis=0)
-        logger.info(f"{version} degradation operator H_est computed")
+        logger.info(f"{version} degradation operator H_est computed (tissue excluded)")
         logger.info(f"  - Mean: {np.mean(H_est):.4f}, Std: {np.std(H_est):.4f}")
         return H_est
     else:

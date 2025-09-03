@@ -339,8 +339,8 @@ class UltrasoundDDRMRunner(Diffusion):
                 logger.info(f"Final image range: Min: {restored_tensor.min():.3f}, Max: {restored_tensor.max():.3f}, Mean: {restored_tensor.mean():.3f}")
 
                 # Apply tissue enhancement post-processing - 조직을 원본처럼 밝게 복원
-                if H_funcs.tissue_mask is not None:
-                    restored_tensor = self._enhance_tissue_pixels(restored_tensor, H_funcs.tissue_mask, x_orig.squeeze().cpu(), version)
+                #if H_funcs.tissue_mask is not None:
+                #    restored_tensor = self._enhance_tissue_pixels(restored_tensor, H_funcs.tissue_mask, x_orig.squeeze().cpu(), version)
 
                 # Save restored image to disk or temporary numpy file
                 restored_path = None

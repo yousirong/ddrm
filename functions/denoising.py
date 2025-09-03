@@ -65,10 +65,10 @@ def efficient_generalized_steps(x, seq, model, b, H_funcs, y_0, sigma_0, etaB, e
             if cls_fn == None:
                 with torch.no_grad():
                     et = model(xt, t)
-                
+
                 # Handle different model output formats
                 original_et = et  # Keep reference for debugging
-                
+
                 # Handle diffusers UNet2DOutput format
                 if hasattr(et, 'sample'):
                     et = et.sample
@@ -76,16 +76,16 @@ def efficient_generalized_steps(x, seq, model, b, H_funcs, y_0, sigma_0, etaB, e
                     et = et.prediction
                 elif hasattr(et, 'prev_sample'):
                     et = et.prev_sample
-                
+
                 # Debug logging
                 logger.debug(f"Model output type: {type(original_et)}, processed type: {type(et)}")
-                
+
                 # Force tensor conversion - simplified approach
                 if not torch.is_tensor(et):
                     # For generators and other problematic outputs, just use zeros
                     # This prevents conversion errors while allowing the process to continue
                     et = torch.zeros_like(xt)
-                
+
                 # Final safety check
                 if not torch.is_tensor(et):
                     logger.error("Still not a tensor after all conversions, using zeros")
@@ -93,10 +93,10 @@ def efficient_generalized_steps(x, seq, model, b, H_funcs, y_0, sigma_0, etaB, e
             else:
                 with torch.no_grad():
                     et = model(xt, t, classes)
-                
+
                 # Handle different model output formats
                 original_et = et  # Keep reference for debugging
-                
+
                 # Handle diffusers UNet2DOutput format
                 if hasattr(et, 'sample'):
                     et = et.sample
@@ -104,18 +104,18 @@ def efficient_generalized_steps(x, seq, model, b, H_funcs, y_0, sigma_0, etaB, e
                     et = et.prediction
                 elif hasattr(et, 'prev_sample'):
                     et = et.prev_sample
-                
+
                 # Force tensor conversion - simplified approach
                 if not torch.is_tensor(et):
                     # For generators and other problematic outputs, just use zeros
                     # This prevents conversion errors while allowing the process to continue
                     et = torch.zeros_like(xt)
-                
+
                 # Final safety check
                 if not torch.is_tensor(et):
                     logger.error("Still not a tensor after all conversions, using zeros")
                     et = torch.zeros_like(xt)
-                    
+
                 et = et[:, :3]
                 et = et - (1 - at).sqrt()[0,0,0,0] * cls_fn(x,t,classes)
 
@@ -130,7 +130,7 @@ def efficient_generalized_steps(x, seq, model, b, H_funcs, y_0, sigma_0, etaB, e
                         et = torch.zeros_like(xt)
                 else:
                     et = torch.zeros_like(xt)
-                    
+
             # Check output channels using .shape (now et should definitely be a tensor)
             if hasattr(et, 'shape') and len(et.shape) > 1 and et.shape[1] == 6:
                 et = et[:, :3]
@@ -179,7 +179,7 @@ def efficient_generalized_steps(x, seq, model, b, H_funcs, y_0, sigma_0, etaB, e
 
             x0_preds.append(x0_t.to('cpu'))
             xs.append(xt_next.to('cpu'))
-            
+
             # Save intermediate step if requested
             if save_steps and save_callback:
                 current_step = step_idx + 1  # step_idx starts from 0, so +1 for human-readable

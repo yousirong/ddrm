@@ -37,15 +37,23 @@ DISTORTION_FACTOR=${DISTORTION_FACTOR:-0.025}  # Physics model distortion streng
 NOISE_FACTOR=${NOISE_FACTOR:-0.01}            # Physics model noise strength (original: 0.1)
 SAVE_STEPS=${SAVE_STEPS:-""}                   # Comma-separated steps to save intermediate images (e.g., "5,10,15")
 
-# Enhanced features from recent updates
-TISSUE_PROTECTION=${TISSUE_PROTECTION:-"false"}  # Disable tissue protection for full DDRM processing
-VERBOSE_TISSUE=${VERBOSE_TISSUE:-"false"}       # Enable detailed tissue protection logging
+# Enhanced features from recent updates - TISSUE POST-PROCESSING COMMENTED OUT
+# TISSUE_PROTECTION=${TISSUE_PROTECTION:-"false"}  # Disable tissue protection for full DDRM processing
+# VERBOSE_TISSUE=${VERBOSE_TISSUE:-"false"}       # Enable detailed tissue protection logging
 
-# Enhanced tissue detection parameters
-ENHANCED_TISSUE_DETECTION=${ENHANCED_TISSUE_DETECTION:-"false"}  # Disable tissue detection for full DDRM processing
-TISSUE_DETECTION_MODE=${TISSUE_DETECTION_MODE:-"multi"}        # multi/adaptive/edge/simple
-CLAHE_CLIP_LIMIT=${CLAHE_CLIP_LIMIT:-3.0}                     # CLAHE enhancement strength
-MIN_TISSUE_SIZE_FACTOR=${MIN_TISSUE_SIZE_FACTOR:-1.0}          # Tissue size threshold multiplier
+# Enhanced tissue detection parameters - TISSUE POST-PROCESSING COMMENTED OUT
+# ENHANCED_TISSUE_DETECTION=${ENHANCED_TISSUE_DETECTION:-"false"}  # Disable tissue detection for full DDRM processing
+# TISSUE_DETECTION_MODE=${TISSUE_DETECTION_MODE:-"multi"}        # multi/adaptive/edge/simple
+# CLAHE_CLIP_LIMIT=${CLAHE_CLIP_LIMIT:-3.0}                     # CLAHE enhancement strength
+# MIN_TISSUE_SIZE_FACTOR=${MIN_TISSUE_SIZE_FACTOR:-1.0}          # Tissue size threshold multiplier
+
+# Set tissue processing to disabled when commented out
+TISSUE_PROTECTION="false"
+VERBOSE_TISSUE="false"
+ENHANCED_TISSUE_DETECTION="false"
+TISSUE_DETECTION_MODE="multi"
+CLAHE_CLIP_LIMIT=3.0
+MIN_TISSUE_SIZE_FACTOR=1.0
 
 # Optuna optimization mode - prevent image saving
 OPTUNA_MODE=${OPTUNA_MODE:-"false"}                            # Enable memory-only evaluation for Optuna
@@ -103,7 +111,7 @@ CN_OY_PATH="datasets/test_CN_OY"      # Path with CN_OY images for H_est estimat
 CY_OY_PATH="datasets/test_CY_OY"      # Path with CY_OY images for H_est estimation
 TEST_PATH="datasets/test_CY_OY"           # Path to test images for restoration (using some training images as demo)
 
-OUTPUT_DIR="outputs_ultrasound_ddrm_upgrade"
+OUTPUT_DIR="outputs_ultrasound_ddrm_upgrade_2"
 
 # Create config if it doesn't exist
 if [ ! -f "$CONFIG" ]; then
