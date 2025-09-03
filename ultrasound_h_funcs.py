@@ -1169,7 +1169,7 @@ def estimate_version_artifacts(cn_on_path, cy_on_path, version, custom_threshold
         multiplicative_map = np.clip(multiplicative_map, 0.1, 5.0)  # 극단값 제한
 
         # 2. z_est 추정: z_est = CY_ON - M * CN_ON
-        # structural_noise = (cy_img - multiplicative_map * cn_img)
+        structural_noise = (cy_img - multiplicative_map * cn_img)
         # Create version-specific region mask for focused estimation
         y, x = np.ogrid[:512, :512]
         center_y, center_x = 256, 256

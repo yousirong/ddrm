@@ -111,7 +111,7 @@ CN_OY_PATH="datasets/test_CN_OY"      # Path with CN_OY images for H_est estimat
 CY_OY_PATH="datasets/test_CY_OY"      # Path with CY_OY images for H_est estimation
 TEST_PATH="datasets/test_CY_OY"           # Path to test images for restoration (using some training images as demo)
 
-OUTPUT_DIR="outputs_ultrasound_ddrm_upgrade_2"
+OUTPUT_DIR="outputs_ultrasound_ddrm_upgrade"
 
 # Create config if it doesn't exist
 if [ ! -f "$CONFIG" ]; then
