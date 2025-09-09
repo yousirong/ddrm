@@ -71,18 +71,18 @@ PRESERVE_BACKGROUND=${PRESERVE_BACKGROUND:-"false"}                  # Process b
 # V7: Minimal donut (inner_r=15, outer_r=45)
 
 # Version-specific tissue/blind zone separation thresholds (percentiles)
-V3_TISSUE_PERCENTILE=${V3_TISSUE_PERCENTILE:-65}        # V3: Tissue threshold (65th percentile)
-V3_BLIND_ZONE_PERCENTILE=${V3_BLIND_ZONE_PERCENTILE:-35} # V3: Blind zone threshold (35th percentile)
-V4_TISSUE_PERCENTILE=${V4_TISSUE_PERCENTILE:-70}        # V4: Tissue threshold (70th percentile)
-V4_BLIND_ZONE_PERCENTILE=${V4_BLIND_ZONE_PERCENTILE:-40} # V4: Blind zone threshold (40th percentile)
+V3_TISSUE_PERCENTILE=${V3_TISSUE_PERCENTILE:-85}        # V3: Tissue threshold (65th percentile)
+V3_BLIND_ZONE_PERCENTILE=${V3_BLIND_ZONE_PERCENTILE:-50} # V3: Blind zone threshold (35th percentile)
+V4_TISSUE_PERCENTILE=${V4_TISSUE_PERCENTILE:-80}        # V4: Tissue threshold (70th percentile)
+V4_BLIND_ZONE_PERCENTILE=${V4_BLIND_ZONE_PERCENTILE:-55} # V4: Blind zone threshold (40th percentile)
 V5_TISSUE_PERCENTILE=${V5_TISSUE_PERCENTILE:-75}        # V5: Tissue threshold (75th percentile)
-V5_BLIND_ZONE_PERCENTILE=${V5_BLIND_ZONE_PERCENTILE:-45} # V5: Blind zone threshold (45th percentile)
-V6_TISSUE_PERCENTILE=${V6_TISSUE_PERCENTILE:-80}        # V6: Tissue threshold (80th percentile)
-V6_BLIND_ZONE_PERCENTILE=${V6_BLIND_ZONE_PERCENTILE:-50} # V6: Blind zone threshold (50th percentile)
-V7_TISSUE_PERCENTILE=${V7_TISSUE_PERCENTILE:-85}        # V7: Tissue threshold (85th percentile)
-V7_BLIND_ZONE_PERCENTILE=${V7_BLIND_ZONE_PERCENTILE:-55} # V7: Blind zone threshold (55th percentile)
+V5_BLIND_ZONE_PERCENTILE=${V5_BLIND_ZONE_PERCENTILE:-60} # V5: Blind zone threshold (45th percentile)
+V6_TISSUE_PERCENTILE=${V6_TISSUE_PERCENTILE:-70}        # V6: Tissue threshold (80th percentile)
+V6_BLIND_ZONE_PERCENTILE=${V6_BLIND_ZONE_PERCENTILE:-65} # V6: Blind zone threshold (50th percentile)
+V7_TISSUE_PERCENTILE=${V7_TISSUE_PERCENTILE:-65}        # V7: Tissue threshold (85th percentile)
+V7_BLIND_ZONE_PERCENTILE=${V7_BLIND_ZONE_PERCENTILE:-70} # V7: Blind zone threshold (55th percentile)
 
-# Mask cleaning parameters
+# Mask cleaning parameters - Enhanced for angle-aware detection
 TISSUE_MIN_SIZE=${TISSUE_MIN_SIZE:-200}                 # Minimum tissue region size (pixels)
 BLIND_ZONE_MIN_SIZE=${BLIND_ZONE_MIN_SIZE:-100}         # Minimum blind zone region size (pixels)
 
@@ -109,7 +109,7 @@ CN_ON_PATH="datasets/test_CN_ON"  # Path with CN_ON images for z_est estimation
 CY_ON_PATH="datasets/test_CY_ON"  # Path with CY_ON images for z_est estimation
 CN_OY_PATH="datasets/test_CN_OY"      # Path with CN_OY images for H_est estimation
 CY_OY_PATH="datasets/test_CY_OY"      # Path with CY_OY images for H_est estimation
-TEST_PATH="datasets/test_CY_OY"           # Path to test images for restoration (using some training images as demo)
+TEST_PATH="datasets/test_CY_CN_PL"           # Path to test images for restoration (using some training images as demo)
 
 OUTPUT_DIR="outputs_ultrasound_ddrm_upgrade"
 
