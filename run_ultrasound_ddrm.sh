@@ -109,7 +109,7 @@ CN_ON_PATH="datasets/test_CN_ON"  # Path with CN_ON images for z_est estimation
 CY_ON_PATH="datasets/test_CY_ON"  # Path with CY_ON images for z_est estimation
 CN_OY_PATH="datasets/test_CN_OY"      # Path with CN_OY images for H_est estimation
 CY_OY_PATH="datasets/test_CY_OY"      # Path with CY_OY images for H_est estimation
-TEST_PATH="datasets/test_CY_CN_PL"           # Path to test images for restoration (using some training images as demo)
+TEST_PATH="datasets/test_CY_ON_PL"           # Path to test images for restoration (using some training images as demo)
 
 OUTPUT_DIR="outputs_ultrasound_ddrm_upgrade"
 
