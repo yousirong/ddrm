@@ -6,6 +6,19 @@ from pathlib import Path
 from PIL import Image
 import logging
 
+# Import cv2 and scipy for dataset building methods
+try:
+    import cv2
+except ImportError:
+    print("Warning: cv2 not available. Please install opencv-python: pip install opencv-python")
+    cv2 = None
+
+try:
+    from scipy import ndimage
+except ImportError:
+    print("Warning: scipy not available. Please install scipy: pip install scipy")
+    ndimage = None
+
 logger = logging.getLogger(__name__)
 
 class UltrasoundBlindZone(H_functions):
@@ -22,7 +35,7 @@ class UltrasoundBlindZone(H_functions):
     def __init__(self, channels, img_size, device, version=None, noise_pattern=None, distortion_factor=0.025, noise_factor=1.0,
                  enhanced_tissue_detection=True, tissue_detection_mode='multi', clahe_clip_limit=3.0,
                  min_tissue_size_factor=1.0, complete_blind_zone_removal=True, preserve_background=True,
-                 version_thresholds=None, tissue_min_size=200, blind_zone_min_size=100):
+                 version_thresholds=None, tissue_min_size=200, blind_zone_min_size=100, filename=None):
         self.channels = channels
         self.img_size = img_size
         self.device = device
@@ -37,20 +50,45 @@ class UltrasoundBlindZone(H_functions):
         self.complete_blind_zone_removal = complete_blind_zone_removal
         self.preserve_background = preserve_background
 
-        # V3~V7 도넛 기반 파라미터들
+        # V3~V7 도넛 기반 파라미터들 (build_*_dataset.py에서 추출)
         self.version_thresholds = version_thresholds or {}
         self.tissue_min_size = tissue_min_size
         self.blind_zone_min_size = blind_zone_min_size
+        
+        # Dataset building에서 사용된 마스크 생성 파라미터 추가
+        self.radius_map = {
+            'V3': (42, 82, 230),
+            'V4': (25, 48, 133),
+            'V5': (17, 32, 90),
+            'V6': (11, 22, 63),
+            'V7': (9, 17, 48),
+        }
+        
+        # 임계값 및 필터링 파라미터
+        self.thresh_mode = 'hist'  # 'hist' 또는 'fixed'
+        self.fixed_thr_u8 = 50
+        self.keep_side = 'high'  # 'high': 밝은쪽 검출, 'low': 어두운쪽 검출
+        self.min_area_ratio = 0.0005
+        self.hist_bins = 64
+        self.otsu_delta_u8 = [-10, 10]
+        self.otsu_scale = [0.70, 1.30]
+        self.percentile_q = None
 
         logger.info(f"*** UltrasoundBlindZone.__init__: distortion_factor={self.distortion_factor}, noise_factor={self.noise_factor} ***")
         logger.info(f"*** Enhanced detection: {self.enhanced_tissue_detection}, mode: {self.tissue_detection_mode}, CLAHE: {self.clahe_clip_limit} ***")
         logger.info(f"*** Complete blind zone removal: {self.complete_blind_zone_removal}, Preserve background: {self.preserve_background} ***")
         self.version = version
+        self.current_filename = filename
+        logger.info(f"*** 파일명 설정됨: '{filename}' (type: {type(filename)}) ***")
+        if filename:
+            logger.info(f"*** 파일명 내용 확인: '{filename}' ***")
+        else:
+            logger.warning(f"*** 경고: 파일명이 None 또는 빈 값으로 전달됨! ***")
 
         # 조직 보호 관련 변수들 (H/H_pinv는 변경하지 않고 디노이징에서만 사용)
         self.tissue_mask = None
         self.blind_zone_processing_mask = None
-        self.current_filename = None  # 현재 처리 중인 파일명 저장
+        # self.current_filename은 이미 위에서 설정됨 - 다시 설정하지 않음
 
         # Enhanced version-specific parameters based on blind zone physics
         # (outer_radius, inner_radius, distortion_strength, noise_level)
@@ -92,28 +130,37 @@ class UltrasoundBlindZone(H_functions):
 
     def _create_physics_distortion_mask(self, height, width, outer_radius, inner_radius, strength):
         """
-        Create physics-based distortion model for blind zone
-        Instead of binary masking, models physical ultrasound distortion
+        Create physics-based distortion model for blind zone within visible region
+        블라인드존은 중앙 고정, 보이는 영역만 각도별 이동
         """
         y, x = np.ogrid[:height, :width]
         center_y, center_x = height // 2, width // 2
 
-        # PL(tilted) 각도별 중심점 이동 적용
+        # 블라인드존은 항상 중앙 고정 (angle offset 적용 안함)
+        blind_zone_distance = np.sqrt((x - center_x)**2 + (y - center_y)**2)
+
+        # 보이는 영역은 각도별 이동 적용
         angle_offset = self._get_angle_center_offset()
-        center_y += angle_offset['y']
-        center_x += angle_offset['x']
+        visible_center_y = center_y + angle_offset['y']
+        visible_center_x = center_x + angle_offset['x']
+        visible_distance = np.sqrt((x - visible_center_x)**2 + (y - visible_center_y)**2)
 
-        distance = np.sqrt((x - center_x)**2 + (y - center_y)**2)
+        # Create visible region circle (shifted)
+        version_visible_radius = {
+            'V3': 175, 'V4': 150, 'V5': 110, 'V6': 105, 'V7': 95
+        }
+        visible_radius = version_visible_radius.get(self.version, 110)
+        visible_region = (visible_distance <= visible_radius).astype(np.float32)
 
-        # Create smooth distortion profile (not binary)
+        # Create smooth distortion profile (not binary) - 블라인드존은 중앙 고정
         distortion_mask = np.zeros((height, width), dtype=np.float32)
 
-        # Physics-based distortion model: gradual falloff
-        in_blind_zone = (distance >= inner_radius) & (distance <= outer_radius)
+        # Physics-based distortion model: gradual falloff (블라인드존 고정)
+        in_blind_zone = (blind_zone_distance >= inner_radius) & (blind_zone_distance <= outer_radius)
 
         if np.any(in_blind_zone):
             # Normalized distance within blind zone [0, 1]
-            zone_distance = (distance - inner_radius) / (outer_radius - inner_radius)
+            zone_distance = (blind_zone_distance - inner_radius) / (outer_radius - inner_radius)
             zone_distance = np.clip(zone_distance, 0, 1)
 
             # Physics-based distortion profile (bell curve)
@@ -121,10 +168,30 @@ class UltrasoundBlindZone(H_functions):
             distortion_profile = np.exp(-((zone_distance - 0.5) * 4) ** 2) * strength
             distortion_mask[in_blind_zone] = distortion_profile[in_blind_zone]
 
-        return distortion_mask
+        # Constrain distortion to visible region (보이는 영역만 제한)
+        constrained_distortion_mask = distortion_mask * visible_region
+
+        return constrained_distortion_mask
 
     def _create_combined_distortion_mask(self, height, width):
-        """Create combined physics-based distortion model for all versions"""
+        """Create combined physics-based distortion model for all versions within visible region
+        블라인드존은 중앙 고정, 보이는 영역만 각도별 이동"""
+        y, x = np.ogrid[:height, :width]
+        center_y, center_x = height // 2, width // 2
+
+        # 보이는 영역은 각도별 이동 적용
+        angle_offset = self._get_angle_center_offset()
+        visible_center_y = center_y + angle_offset['y']
+        visible_center_x = center_x + angle_offset['x']
+        visible_distance = np.sqrt((x - visible_center_x)**2 + (y - visible_center_y)**2)
+
+        # Create visible region circle with the shifted center
+        version_visible_radius = {
+            'V3': 175, 'V4': 150, 'V5': 110, 'V6': 105, 'V7': 95
+        }
+        visible_radius = version_visible_radius.get(self.version, 110)
+        visible_region = (visible_distance <= visible_radius).astype(np.float32)
+
         combined_mask = np.zeros((height, width), dtype=np.float32)
 
         for version, params in self.VERSION_PARAMS.items():
@@ -134,14 +201,18 @@ class UltrasoundBlindZone(H_functions):
             # Combine using maximum distortion
             combined_mask = np.maximum(combined_mask, version_mask)
 
-        return combined_mask
+        # Ensure the combined mask is constrained to visible region
+        constrained_combined_mask = combined_mask * visible_region
+
+        return constrained_combined_mask
 
     def detect_and_protect_tissue(self, input_image):
         """
-        V3~V7 도넛 형태 내부에서 조직과 블라인드존 구분 검출:
-        1. V3~V7 버전에 따른 도넛 형태 영역 결정
-        2. 도넛 영역 내에서 밝은 조직과 어두운 블라인드존 구분
-        3. 블라인드존만 제거하고 조직은 보호
+        가시 영역 원 내부에서 V3~V7 도넛 형태의 조직과 블라인드존 구분 검출:
+        1. 각도별 중심점 이동을 적용한 가시 영역 원 생성
+        2. 가시 영역 내에서 V3~V7 버전에 따른 도넛 형태 영역 결정
+        3. 도넛 영역 내에서 밝은 조직과 어두운 블라인드존 구분
+        4. 블라인드존만 제거하고 조직은 보호
         """
         if isinstance(input_image, torch.Tensor):
             if len(input_image.shape) == 4:  # (B, C, H, W)
@@ -153,29 +224,55 @@ class UltrasoundBlindZone(H_functions):
         else:
             image_np = input_image
 
-        # === 1단계: 버전별 도넛 영역 결정 ===
-        donut_region = self._create_version_donut_region(image_np.shape, self.version)
+        # === 1단계: 가시 영역 원 생성 ===
+        height, width = image_np.shape
+        center_y, center_x = height // 2, width // 2
 
-        # === 2단계: 도넛 내에서 조직과 블라인드존 구분 ===
+        # 각도별 중심점 이동 적용
+        angle_offset = self._get_angle_center_offset()
+        center_y += angle_offset['y']
+        center_x += angle_offset['x']
+
+        y, x = np.ogrid[:height, :width]
+        distance = np.sqrt((x - center_x)**2 + (y - center_y)**2)
+
+        # 버전별 가시 영역 반지름
+        version_visible_radius = {
+            'V3': 175, 'V4': 150, 'V5': 110, 'V6': 105, 'V7': 95
+        }
+        visible_radius = version_visible_radius.get(self.version, 110)
+        visible_region = (distance <= visible_radius).astype(np.float32)
+
+        # === 2단계: 가시 영역 내에서 버전별 도넛 영역 결정 ===
+        donut_region = self._create_version_donut_region(image_np.shape, self.version)
+        # 도넛 영역을 가시 영역으로 제한
+        constrained_donut_region = donut_region * visible_region
+
+        # === 3단계: 제한된 도넛 내에서 조직과 블라인드존 구분 ===
         self.tissue_mask, blind_zone_mask = self._separate_tissue_and_blind_zone_in_donut(
-            image_np, donut_region, self.version
+            image_np, constrained_donut_region, self.version
         )
 
-        # === 2.5단계: 조직 내에서 강한 조직(70% 이상) 별도 식별 ===
+        # === 4단계: 조직 내에서 강한 조직(70% 이상) 별도 식별 ===
         # 원본 이미지 정보 저장 (H_pinv에서 원본 복원에 사용)
         self.original_image = image_np.copy()
         self.strong_tissue_mask = self._identify_strong_tissue(image_np, self.tissue_mask)
 
-        # === 3단계: 블라인드존만 제거를 위한 마스크 ===
+        # === 5단계: 블라인드존만 제거를 위한 마스크 ===
         self.blind_zone_processing_mask = blind_zone_mask
 
         # 로그 출력
-        donut_coverage = np.sum(donut_region) / donut_region.size * 100
+        visible_coverage = np.sum(visible_region) / visible_region.size * 100
+        donut_coverage = np.sum(constrained_donut_region) / constrained_donut_region.size * 100
         tissue_coverage = np.sum(self.tissue_mask) / self.tissue_mask.size * 100
         blind_zone_coverage = np.sum(blind_zone_mask) / blind_zone_mask.size * 100
 
-        logger.info(f"{self.version} 도넛 영역에서 조직/블라인드존 구분 완료:")
-        logger.info(f"  - 도넛 영역: {donut_coverage:.1f}%")
+        # 가시 영역 이동 정보 추가
+        angle_offset = self._get_angle_center_offset()
+
+        logger.info(f"{self.version} 가시 영역 내 조직/블라인드존 구분 완료:")
+        logger.info(f"  - 가시 영역: {visible_coverage:.1f}% (중심점 이동: x={angle_offset['x']:+d}, y={angle_offset['y']:+d})")
+        logger.info(f"  - 제한된 도넛 영역: {donut_coverage:.1f}%")
         logger.info(f"  - 조직 영역 (보호): {tissue_coverage:.1f}%")
         logger.info(f"  - 블라인드존 영역 (제거): {blind_zone_coverage:.1f}%")
 
@@ -189,41 +286,22 @@ class UltrasoundBlindZone(H_functions):
 
     def _create_version_donut_region(self, shape, version):
         """
-        V3~V7 버전별 도넛 형태 영역 생성 (하드코딩)
-        조직과 블라인드존이 모두 있는 영역
-        PL(tilted) 각도별 중심점 이동 적용
+        V3~V7 버전별 도넛 형태 영역 생성 (build_dataset.py 방식 사용)
+        블라인드존/조직은 중앙 고정, 보이는 영역만 각도별 이동
         """
         height, width = shape
-        center_y, center_x = height // 2, width // 2
-
-        # 파일명에서 각도 정보 추출하여 중심점 이동 적용
+        
+        # Dataset building 방식의 make_roi_masks_from_V 함수 사용
+        donut_mask, r_in, r_out, block_mask = self.make_roi_masks_from_V(height, width, version)
+        
+        # 각도 정보는 로그용으로만 사용
         angle_offset = self._get_angle_center_offset()
-        center_y += angle_offset['y']
-        center_x += angle_offset['x']
-
-        y, x = np.ogrid[:height, :width]
-        distance = np.sqrt((x - center_x)**2 + (y - center_y)**2)
-
-        # 버전별 도넛 매개변수 (하드코딩)
-        version_params = {
-            'V3': {'inner_r': 85, 'outer_r': 220},   # 대형 도넛
-            'V4': {'inner_r': 50, 'outer_r': 130},   # 중대형 도넛
-            'V5': {'inner_r': 30, 'outer_r': 90},    # 중형 도넛
-            'V6': {'inner_r': 20, 'outer_r': 60},    # 소형 도넛
-            'V7': {'inner_r': 15, 'outer_r': 45}     # 최소형 도넛
-        }
-
-        # 기본값은 V5 사용
-        params = version_params.get(version, version_params['V5'])
-        inner_r, outer_r = params['inner_r'], params['outer_r']
-
-        # 도넛 영역 마스크 생성
-        donut_mask = ((distance >= inner_r) & (distance <= outer_r)).astype(np.float32)
-
-        logger.info(f"{version} 도넛 영역 생성: inner_r={inner_r}, outer_r={outer_r}")
-        logger.info(f"  - 중심점 이동: ({angle_offset['x']:+.0f}, {angle_offset['y']:+.0f})")
+        
+        logger.info(f"{version} 도넛 영역 생성 (dataset building 방식): r_in={r_in}, r_out={r_out} (중앙 고정)")
+        logger.info(f"  - 보이는 영역 이동: ({angle_offset['x']:+.0f}, {angle_offset['y']:+.0f})")
         logger.info(f"  - 도넛 영역 비율: {np.sum(donut_mask) / donut_mask.size * 100:.1f}%")
-
+        logger.info(f"  - 차폐 영역 비율: {np.sum(block_mask) / block_mask.size * 100:.1f}%")
+        
         return donut_mask
 
     def _get_angle_center_offset(self):
@@ -236,7 +314,17 @@ class UltrasoundBlindZone(H_functions):
         """
         if not hasattr(self, 'current_filename') or not self.current_filename:
             # 파일명 정보가 없으면 중심점 이동 없음
+            logger.warning("*** 경고: 파일명 정보 없어서 중심점 이동 불가 - (0, 0) 사용 ***")
+            logger.warning(f"*** current_filename 속성 존재: {hasattr(self, 'current_filename')} ***")
+            if hasattr(self, 'current_filename'):
+                logger.warning(f"*** current_filename 값: {self.current_filename} ***")
             return {'x': 0, 'y': 0}
+        
+        # estimation_mode 중에는 경고 없이 기본값 사용
+        if self.current_filename == "estimation_mode":
+            return {'x': 0, 'y': 0}
+
+        logger.info(f"*** 파일명 분석중: {self.current_filename} ***")
 
         filename = self.current_filename
 
@@ -244,20 +332,55 @@ class UltrasoundBlindZone(H_functions):
         angle_offsets = {
             'D000': {'x': 80, 'y': 0},      # 오후 3시 방향 (우측으로 이동)
             'D045': {'x': 60, 'y': -60},    # 오후 1시 30분 방향 (우상단)
-            'D270': {'x': -80, 'y': 0},     # 오후 9시 방향 (좌측으로 이동)
-            'D315': {'x': -60, 'y': -60}    # 오후 11시 방향 (좌상단)
+            'D270': {'x': 0, 'y': 80},      # 오후 6시 방향 (아래쪽으로 이동)
+            'D315': {'x': 60, 'y': 60}      # 오후 4시 30분 방향 (우하단)
         }
 
         # 파일명에서 각도 추출
         for angle_key in angle_offsets.keys():
             if angle_key in filename:
                 offset = angle_offsets[angle_key]
-                logger.info(f"각도 {angle_key} 감지: 중심점 이동 ({offset['x']:+d}, {offset['y']:+d})")
+                logger.info(f"*** 각도 {angle_key} 감지: 중심점 이동 ({offset['x']:+d}, {offset['y']:+d}) ***")
                 return offset
 
         # 각도 정보가 없으면 중심점 이동 없음
-        logger.info("각도 정보 없음: 중심점 이동 없음")
+        logger.warning(f"*** 경고: 파일명 '{filename}'에서 각도 정보 찾을 수 없음 - (0, 0) 사용 ***")
         return {'x': 0, 'y': 0}
+
+    def _create_visible_region_circle(self, shape, version):
+        """
+        각도별 중심점 이동을 적용한 가시 영역 원 생성
+        블라인드존과 조직 탐지가 모두 이 원 안에서 이루어짐
+        """
+        height, width = shape
+        center_y, center_x = height // 2, width // 2
+
+        # 각도별 중심점 이동 적용
+        angle_offset = self._get_angle_center_offset()
+        center_y += angle_offset['y']
+        center_x += angle_offset['x']
+
+        y, x = np.ogrid[:height, :width]
+        distance = np.sqrt((x - center_x)**2 + (y - center_y)**2)
+
+        # 버전별 가시 영역 반지름 (도넛의 outer_radius보다 약간 크게 설정)
+        version_visible_radius = {
+            'V3': 175,  # V3 outer_r(220) + 여유분
+            'V4': 150,  # V4 outer_r(130) + 여유분
+            'V5': 110,  # V5 outer_r(90) + 여유분
+            'V6': 105,   # V6 outer_r(60) + 여유분
+            'V7': 85    # V7 outer_r(45) + 여유분
+        }
+
+        visible_radius = version_visible_radius.get(version, 110)
+        visible_circle = (distance <= visible_radius).astype(np.float32)
+
+        logger.info(f"{version} 가시 영역 원 생성:")
+        logger.info(f"  - 반지름: {visible_radius}")
+        logger.info(f"  - 중심점 이동: ({angle_offset['x']:+.0f}, {angle_offset['y']:+.0f})")
+        logger.info(f"  - 가시 영역 비율: {np.sum(visible_circle) / visible_circle.size * 100:.1f}%")
+
+        return visible_circle
 
     def set_current_filename(self, filename):
         """현재 처리 중인 파일명 설정"""
@@ -267,66 +390,29 @@ class UltrasoundBlindZone(H_functions):
     def _separate_tissue_and_blind_zone_in_donut(self, image, donut_region, version):
         """
         도넛 영역 내에서 조직(밝은 영역)과 블라인드존(어두운 영역) 구분
-        조직은 블라인드존보다 무조건 밝음
+        build_dataset.py 방식의 임계값 처리 사용
         """
-        # 도넛 영역 내의 픽셀값만 추출
-        donut_pixels = image * donut_region
-        donut_values = donut_pixels[donut_region > 0.5]  # 도넛 영역의 픽셀값들
-
-        if len(donut_values) == 0:
-            logger.warning(f"{version} 도넛 영역에 픽셀이 없음")
-            return np.zeros_like(donut_region), np.zeros_like(donut_region)
-
-        # 버전별 조직/블라인드존 구분 임계값 (명령줄 인수로 전달된 값 사용)
-        default_thresholds = {
-            'V3': {'tissue_percentile': 65, 'blind_zone_percentile': 35},  # V3: 밝기 차이가 큰 경우
-            'V4': {'tissue_percentile': 70, 'blind_zone_percentile': 40},  # V4: 중간 정도 차이
-            'V5': {'tissue_percentile': 75, 'blind_zone_percentile': 45},  # V5: 표준 설정
-            'V6': {'tissue_percentile': 80, 'blind_zone_percentile': 50},  # V6: 차이가 작은 경우
-            'V7': {'tissue_percentile': 85, 'blind_zone_percentile': 55}   # V7: 가장 미세한 차이
-        }
-
-        # 전달된 값이 있으면 사용, 없으면 기본값 사용
-        if self.version_thresholds and version in self.version_thresholds:
-            thresholds = self.version_thresholds[version]
-            logger.info(f"{version} 커스텀 임계값 사용: {thresholds}")
-        else:
-            thresholds = default_thresholds.get(version, default_thresholds['V5'])
-            logger.info(f"{version} 기본 임계값 사용: {thresholds}")
-
-        # 도넛 내 픽셀값 분석
-        tissue_threshold = np.percentile(donut_values, thresholds['tissue_percentile'])
-        blind_zone_threshold = np.percentile(donut_values, thresholds['blind_zone_percentile'])
-
-        logger.info(f"{version} 도넛 내 픽셀 분석:")
-        logger.info(f"  - 도넛 픽셀값 범위: {np.min(donut_values):.3f} ~ {np.max(donut_values):.3f}")
-        logger.info(f"  - 조직 임계값 ({thresholds['tissue_percentile']}%): {tissue_threshold:.3f}")
-        logger.info(f"  - 블라인드존 임계값 ({thresholds['blind_zone_percentile']}%): {blind_zone_threshold:.3f}")
-
-        # 조직 마스크: 도넛 내에서 밝은 영역
-        tissue_mask = np.zeros_like(image)
-        tissue_condition = (donut_region > 0.5) & (image >= tissue_threshold)
-        tissue_mask[tissue_condition] = 1.0
-
-        # 블라인드존 마스크: 도넛 내에서 어두운 영역 (조직 제외)
-        blind_zone_mask = np.zeros_like(image)
-        blind_zone_condition = (donut_region > 0.5) & (image <= blind_zone_threshold) & (tissue_mask == 0)
-        blind_zone_mask[blind_zone_condition] = 1.0
-
-        # 마스크 후처리 (노이즈 제거) - 커스텀 최소 크기 사용
-        tissue_mask = self._clean_mask(tissue_mask, min_size=self.tissue_min_size)
-        blind_zone_mask = self._clean_mask(blind_zone_mask, min_size=self.blind_zone_min_size)
-
+        height, width = image.shape
+        
+        # Dataset building 방식의 ROI 마스크 생성
+        donut_mask, r_in, r_out, block_mask = self.make_roi_masks_from_V(height, width, version)
+        
+        # Dataset building 방식의 임계값 처리
+        tissue_mask, blind_zone_mask = self.process_image_with_dataset_method(image, version)
+        
         # 결과 로깅
         tissue_coverage = np.sum(tissue_mask) / tissue_mask.size * 100
         blind_zone_coverage = np.sum(blind_zone_mask) / blind_zone_mask.size * 100
-        total_donut_coverage = np.sum(donut_region) / donut_region.size * 100
-
-        logger.info(f"{version} 조직/블라인드존 구분 결과:")
-        logger.info(f"  - 전체 도넛 영역: {total_donut_coverage:.1f}%")
+        total_donut_coverage = np.sum(donut_mask) / donut_mask.size * 100
+        
+        # 가시 영역 shift 정보 추가
+        angle_offset = self._get_angle_center_offset()
+        
+        logger.info(f"{version} 조직/블라인드존 구분 결과 (dataset building 방식):")
+        logger.info(f"  - 전체 도넛 영역: {total_donut_coverage:.1f}% (가시 영역 shift: x={angle_offset['x']:+d}, y={angle_offset['y']:+d})")
         logger.info(f"  - 조직 영역 (보호): {tissue_coverage:.1f}%")
         logger.info(f"  - 블라인드존 영역 (제거): {blind_zone_coverage:.1f}%")
-
+        
         return tissue_mask, blind_zone_mask
 
     def _identify_strong_tissue(self, image, tissue_mask):
@@ -343,7 +429,7 @@ class UltrasoundBlindZone(H_functions):
             return np.zeros_like(image)
 
         # 70th percentile 이상을 강한 조직으로 정의 (더 많은 밝은 영역 포함)
-        strong_tissue_threshold = np.percentile(tissue_pixels, 70)
+        strong_tissue_threshold = np.percentile(tissue_pixels, 80)
 
         # 강한 조직 마스크 생성
         strong_tissue_mask = np.zeros_like(image)
@@ -353,7 +439,8 @@ class UltrasoundBlindZone(H_functions):
         strong_count = np.sum(strong_tissue_mask > 0.5)
         total_tissue_count = np.sum(tissue_mask > 0.5)
 
-        logger.info(f"{self.version} 강한 조직 식별: {strong_count}/{total_tissue_count}개 픽셀 (임계값: {strong_tissue_threshold:.3f})")
+        angle_offset = self._get_angle_center_offset()
+        logger.info(f"{self.version} 강한 조직 식별: {strong_count}/{total_tissue_count}개 픽셀 (임계값: {strong_tissue_threshold:.3f}, 가시 영역 shift: x={angle_offset['x']:+d}, y={angle_offset['y']:+d})")
 
         return strong_tissue_mask
 
@@ -466,9 +553,10 @@ class UltrasoundBlindZone(H_functions):
             # === 4단계: 향상된 후처리 ===
             final_mask = self._advanced_post_processing(combined_mask, img_norm)
 
-            # 결과 통계
+            # 결과 통계 with visible region shift info
             tissue_coverage = np.sum(final_mask > 0.5) / final_mask.size * 100
-            logger.info(f"개선된 조직 검출 완료: {tissue_coverage:.1f}% 영역")
+            angle_offset = self._get_angle_center_offset()
+            logger.info(f"개선된 조직 검출 완료: {tissue_coverage:.1f}% 영역 (가시 영역 shift: x={angle_offset['x']:+d}, y={angle_offset['y']:+d})")
 
             if tissue_coverage > 0:
                 logger.info(f"검출 방법 수: {len(masks)}, 최종 마스크 강도: {np.max(final_mask):.2f}")
@@ -901,21 +989,19 @@ class UltrasoundBlindZone(H_functions):
                 tissue_expanded = tissue_tensor.unsqueeze(0).unsqueeze(0)
                 blind_zone_expanded = blind_zone_tensor.unsqueeze(0).unsqueeze(0)
 
-                # Tissue region: minimal distortion (strong protection)
-                tissue_distortion_factor = self.distortion_factor * float(os.getenv('TISSUE_DISTORTION_FACTOR', '0.1'))
-                tissue_distortion = vec * (1.0 + mask_expanded * tissue_distortion_factor) * tissue_expanded
+                # Tissue region: NO distortion (완전 보호 - 원본 유지)
+                tissue_distortion = vec * tissue_expanded
 
-                # Blind zone region: configurable distortion
+                # Blind zone region: FULL distortion (블라인드존만 왜곡 적용)
                 blind_zone_distortion_factor = self.distortion_factor * float(os.getenv('BLIND_ZONE_DISTORTION_FACTOR', '1.0'))
                 blind_zone_distortion = vec * (1.0 + mask_expanded * blind_zone_distortion_factor) * blind_zone_expanded
 
-                # Background region: minimal distortion
+                # Background region: NO distortion (완전 보호 - 원본 유지)
                 background_mask = 1.0 - tissue_expanded - blind_zone_expanded
                 background_mask = torch.clamp(background_mask, 0.0, 1.0)
-                background_distortion_factor = self.distortion_factor * float(os.getenv('BACKGROUND_DISTORTION_FACTOR', '0.1'))
-                background_distortion = vec * (1.0 + mask_expanded * background_distortion_factor) * background_mask
+                background_distortion = vec * background_mask
 
-                # Combine all distortions
+                # Combine: 블라인드존만 왜곡, 나머지는 원본 유지
                 distorted = tissue_distortion + blind_zone_distortion + background_distortion
 
             else:
@@ -926,10 +1012,10 @@ class UltrasoundBlindZone(H_functions):
             noise_expanded = self.noise_pattern.unsqueeze(0).unsqueeze(0).expand_as(distorted)
 
             if hasattr(self, 'tissue_mask') and self.tissue_mask is not None:
-                # Differentiated noise application - minimal noise for tissue
-                tissue_noise = noise_expanded * mask_expanded * (self.noise_factor * float(os.getenv('TISSUE_NOISE_FACTOR', '0.05'))) * tissue_expanded
+                # Differentiated noise application - 블라인드존에만 노이즈 적용
+                tissue_noise = torch.zeros_like(noise_expanded)  # 조직: 노이즈 없음 (원본 유지)
                 blind_zone_noise = noise_expanded * mask_expanded * (self.noise_factor * float(os.getenv('BLIND_ZONE_NOISE_FACTOR', '1.0'))) * blind_zone_expanded
-                background_noise = noise_expanded * mask_expanded * (self.noise_factor * float(os.getenv('BACKGROUND_NOISE_FACTOR', '0.1'))) * background_mask
+                background_noise = torch.zeros_like(noise_expanded)  # 배경: 노이즈 없음 (원본 유지)
 
                 total_noise = tissue_noise + blind_zone_noise + background_noise
             else:
@@ -952,10 +1038,18 @@ class UltrasoundBlindZone(H_functions):
         Physics-based pseudo-inverse H^+ with tissue/blind zone differentiation
         """
         if len(vec.shape) == 4:  # (B, C, H, W)
-            # Remove structural noise
+            # Remove structural noise ONLY from blind zone areas
             noise_expanded = self.noise_pattern.unsqueeze(0).unsqueeze(0).expand_as(vec)
             mask_expanded = self.mask_tensor.unsqueeze(0).unsqueeze(0).expand_as(vec)
-            denoised = vec - noise_expanded * mask_expanded * self.noise_factor
+            
+            if hasattr(self, 'tissue_mask') and self.tissue_mask is not None:
+                blind_zone_tensor = torch.from_numpy(self.blind_zone_processing_mask).float().to(vec.device)
+                blind_zone_expanded = blind_zone_tensor.unsqueeze(0).unsqueeze(0)
+                # 블라인드존에서만 노이즈 제거, 나머지는 원본 유지
+                denoised = vec - noise_expanded * mask_expanded * self.noise_factor * blind_zone_expanded
+            else:
+                # Fallback: uniform noise removal
+                denoised = vec - noise_expanded * mask_expanded * self.noise_factor
 
             # Apply differentiated inverse operation
             if hasattr(self, 'tissue_mask') and self.tissue_mask is not None:
@@ -981,23 +1075,20 @@ class UltrasoundBlindZone(H_functions):
                     # 조직 전체 처리
                     tissue_inverse = strong_tissue_inverse + weak_tissue_inverse
                 else:
-                    # 기존 방식: 모든 조직을 동일하게 처리 - 더 강한 보호
-                    tissue_regularization = 0.98  # 조직을 거의 완전히 보호
-                    tissue_inverse = tissue_expanded * tissue_regularization
+                    # 조직: 완전 보호 (원본 유지) - 1.0 = 변화 없음
+                    tissue_inverse = tissue_expanded * 1.0
 
-                # Blind zone region: strong inverse (restoration)
+                # Blind zone region: strong inverse (restoration) - 블라인드존만 복원
                 blind_zone_regularized_mask = self.mask_tensor / (1.0 + self.mask_tensor * 0.5 + 1e-6)
                 blind_zone_inverse = (1.0 - blind_zone_regularized_mask).unsqueeze(0).unsqueeze(0)
                 blind_zone_correction = blind_zone_expanded * blind_zone_inverse
 
-                # Background region: standard inverse
+                # Background region: 완전 보호 (원본 유지) - 1.0 = 변화 없음
                 background_mask = 1.0 - tissue_expanded - blind_zone_expanded
                 background_mask = torch.clamp(background_mask, 0.0, 1.0)
-                background_regularized_mask = self.mask_tensor / (1.0 + self.mask_tensor + 1e-6)
-                background_inverse = (1.0 - background_regularized_mask).unsqueeze(0).unsqueeze(0)
-                background_correction = background_mask * background_inverse
+                background_correction = background_mask * 1.0
 
-                # Combine all inverse operations
+                # Combine: 블라인드존만 역변환, 나머지는 원본 유지
                 adaptive_inverse = tissue_inverse + blind_zone_correction + background_correction
                 result = denoised * adaptive_inverse
 
@@ -1096,7 +1187,8 @@ class UltrasoundBlindZone(H_functions):
             return result_2d.view(vec.shape[0], -1)
 
     def _get_donut_mask(self, shape, version):
-        """버전별 도넛 마스크 생성"""
+        """가시 영역 원 내에서 버전별 도넛 마스크 생성
+        블라인드존/도넛은 중앙 고정, 보이는 영역만 각도별 이동"""
         if len(shape) == 4:
             height, width = shape[2], shape[3]
         else:
@@ -1104,13 +1196,23 @@ class UltrasoundBlindZone(H_functions):
 
         center_y, center_x = height // 2, width // 2
 
-        # PL(tilted) 각도별 중심점 이동 적용
-        angle_offset = self._get_angle_center_offset()
-        center_y += angle_offset['y']
-        center_x += angle_offset['x']
-
         y, x = np.ogrid[:height, :width]
-        distance = np.sqrt((x - center_x)**2 + (y - center_y)**2)
+
+        # 블라인드존/도넛 영역은 중앙 고정
+        blind_zone_distance = np.sqrt((x - center_x)**2 + (y - center_y)**2)
+
+        # 보이는 영역은 각도별 이동 적용
+        angle_offset = self._get_angle_center_offset()
+        visible_center_y = center_y + angle_offset['y']
+        visible_center_x = center_x + angle_offset['x']
+        visible_distance = np.sqrt((x - visible_center_x)**2 + (y - visible_center_y)**2)
+
+        # 가시 영역 원 생성 (shifted center 사용)
+        version_visible_radius = {
+            'V3': 175, 'V4': 150, 'V5': 110, 'V6': 105, 'V7': 95
+        }
+        visible_radius = version_visible_radius.get(version, 110)
+        visible_region = (visible_distance <= visible_radius).astype(np.float32)
 
         # 버전별 도넛 매개변수
         version_params = {
@@ -1124,10 +1226,217 @@ class UltrasoundBlindZone(H_functions):
         params = version_params.get(version, version_params['V5'])
         inner_r, outer_r = params['inner_r'], params['outer_r']
 
-        # 도넛 영역 마스크 생성 (inner_r < distance <= outer_r)
-        donut_mask = ((distance >= inner_r) & (distance <= outer_r)).astype(np.float32)
+        # 도넛 영역 마스크 생성 (중앙 고정 거리 사용)
+        donut_mask = ((blind_zone_distance >= inner_r) & (blind_zone_distance <= outer_r)).astype(np.float32)
 
-        return torch.from_numpy(donut_mask).float()
+        # 가시 영역으로 제한
+        constrained_donut_mask = donut_mask * visible_region
+
+        return torch.from_numpy(constrained_donut_mask).float()
+    
+    def make_roi_masks_from_V(self, h, w, v_token: str):
+        """
+        build_dataset.py의 make_roi_masks_from_V 함수 구현
+        radius_map이 3튜플일 때: (block_lo, r_in, r_out)
+          - block_lo ~ r_in     구간은 항상 0(검정, 무효)
+          - r_in ~ r_out        구간만 ROI(도넛)으로 사용
+        반환: donut_mask, r_in, r_out, block_mask
+        """
+        if v_token not in self.radius_map:
+            raise ValueError(f"radius_map에 '{v_token}' 항목이 없습니다.")
+        vals = self.radius_map[v_token]
+        if len(vals) == 2:
+            r_in, r_out = vals
+            r_block_lo = None
+        elif len(vals) == 3:
+            r_block_lo, r_in, r_out = vals
+        else:
+            raise ValueError("radius_map 값은 (r_in,r_out) 또는 (block_lo,r_in,r_out) 이어야 합니다.")
+
+        max_r = min(h, w) / 2.0 - 1.0
+        r_in   = float(np.clip(r_in, 0.0, max_r))
+        r_out  = float(np.clip(r_out, r_in + 1e-6, max_r))
+        if len(vals) == 3:
+            r_block_lo = float(np.clip(r_block_lo, 0.0, r_in))
+        cx = (w - 1) / 2.0; cy = (h - 1) / 2.0
+        yy, xx = np.indices((h, w), dtype=np.float32)
+        rr = np.sqrt((xx - cx) ** 2 + (yy - cy) ** 2)
+
+        donut_mask = ((rr >= r_in) & (rr <= r_out)).astype(np.float32)
+        if len(vals) == 3:
+            # 차폐 구간: [r_block_lo, r_in)  → 항상 0으로 만들기 위함
+            block_mask = ((rr >= r_block_lo) & (rr < r_in)).astype(np.float32)
+        else:
+            block_mask = np.zeros((h, w), dtype=np.float32)
+
+        return donut_mask, r_in, r_out, block_mask
+    
+    def compute_threshold(self, img01: np.ndarray, mode='hist', fixed_thr_u8=50, mask: np.ndarray=None,
+                         otsu_delta_u8: float = 0.0, otsu_scale: float = 1.0, percentile_q: float = None):
+        """
+        build_dataset.py의 compute_threshold 함수 구현
+        """
+        if mode == 'fixed':
+            return float(np.clip(fixed_thr_u8, 0, 255)) / 255.0
+        vec = img01[mask > 0.5].flatten() if mask is not None else img01.flatten()
+        vec = np.clip(vec, 0, 1)
+        if vec.size == 0: return 0.5
+        if percentile_q is not None:
+            q = float(np.clip(percentile_q, 0.0, 1.0))
+            thr01 = float(np.percentile(vec, q * 100.0))
+            return float(np.clip(thr01, 0.0, 1.0))
+        
+        if cv2 is None:
+            # Fallback to simple thresholding if cv2 is not available
+            logger.warning("cv2 not available, using mean-based threshold")
+            thr01 = float(np.mean(vec))
+            return float(np.clip(thr01, 0.0, 1.0))
+            
+        u8 = (vec * 255).astype(np.uint8).reshape(-1, 1)
+        thr_u8, _ = cv2.threshold(u8, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        thr_u8 = int(np.clip(thr_u8 * float(otsu_scale) + float(otsu_delta_u8), 0, 255))
+        return float(thr_u8) / 255.0
+    
+    def build_binary_mask(self, src01: np.ndarray, thr01: float, keep='high'):
+        """
+        build_dataset.py의 build_binary_mask 함수 구현
+        """
+        return (src01 >= thr01).astype(np.float32) if keep == 'high' else (src01 <= thr01).astype(np.float32)
+    
+    def filter_small_components(self, bin_mask01: np.ndarray, min_area_ratio=0.0005):
+        """
+        build_dataset.py의 filter_small_components 함수 구현
+        """
+        H, W = bin_mask01.shape[:2]
+        min_area = max(1, int(H * W * max(0.0, min_area_ratio)))
+        
+        if cv2 is None:
+            # Fallback: return original mask if cv2 is not available
+            logger.warning("cv2 not available, skipping small component filtering")
+            return bin_mask01
+            
+        u8 = (bin_mask01 > 0.5).astype(np.uint8)
+        num, labels, stats, _ = cv2.connectedComponentsWithStats(u8, connectivity=8)
+        if num <= 1: return bin_mask01
+        out = np.zeros_like(u8)
+        for i in range(1, num):
+            if stats[i, cv2.CC_STAT_AREA] >= min_area:
+                out[labels == i] = 1
+        return out.astype(np.float32)
+    
+    def gen_threshold_variants(self, img, donut):
+        """
+        build_dataset.py의 gen_threshold_variants 함수 구현
+        임계값 후보 생성
+        """
+        import random
+        np.random.seed(42)
+        
+        def _is_range(x): return isinstance(x, (list, tuple)) and len(x) == 2
+        def _sample_from(x):
+            if _is_range(x):
+                lo, hi = float(x[0]), float(x[1])
+                return float(np.random.uniform(lo, hi))
+            return float(x)
+        
+        if self.percentile_q is not None:
+            any_range = _is_range(self.percentile_q)
+            ns = 2 if any_range else 1
+            for _ in range(ns):
+                q = float(_sample_from(self.percentile_q))
+                thr01 = self.compute_threshold(
+                    img, mode='hist', fixed_thr_u8=self.fixed_thr_u8, mask=donut,
+                    percentile_q=q
+                )
+                meta = {'mode': 'perc', 'q': q}
+                yield thr01, meta
+        else:
+            # --- Otsu 모드 ---
+            any_range = _is_range(self.otsu_scale) or _is_range(self.otsu_delta_u8)
+            target_n = 3 if any_range else 1
+            
+            # 1) baseline 먼저 (scale=1.0, delta=0)
+            baseline_s = 1.0
+            baseline_d = 0.0
+            thr01 = self.compute_threshold(
+                img, mode='hist', fixed_thr_u8=self.fixed_thr_u8, mask=donut,
+                otsu_scale=baseline_s, otsu_delta_u8=baseline_d, percentile_q=None
+            )
+            yield thr01, {'mode': 'otsu', 'scale': baseline_s, 'delta': baseline_d}
+            
+            if target_n == 1:
+                return
+            
+            # 2) 나머지 랜덤
+            combos = set()
+            combos.add((round(baseline_s, 3), int(round(baseline_d))))
+            
+            while len(combos) < target_n:
+                s = float(_sample_from(self.otsu_scale))
+                d = float(_sample_from(self.otsu_delta_u8))
+                key = (round(s, 3), int(round(d)))
+                if key in combos:
+                    continue
+                combos.add(key)
+                thr01 = self.compute_threshold(
+                    img, mode='hist', fixed_thr_u8=self.fixed_thr_u8, mask=donut,
+                    otsu_scale=key[0], otsu_delta_u8=key[1], percentile_q=None
+                )
+                yield thr01, {'mode': 'otsu', 'scale': key[0], 'delta': key[1]}
+    
+    def process_image_with_dataset_method(self, image, version):
+        """
+        build_dataset.py 방식을 사용한 이미지 처리
+        조직과 블라인드존 구분을 위한 임계값 기반 처리
+        """
+        H, W = image.shape
+        
+        # === 도넛 ROI + 차폐 밴드 ===
+        donut, r_in, r_out, block_band = self.make_roi_masks_from_V(H, W, version)
+        
+        # === 임계값 샘플 생성 & 처리 ===
+        tissue_masks = []
+        blind_zone_masks = []
+        
+        for thr01, meta in self.gen_threshold_variants(image, donut):
+            # (1) 검출 마스크 (ROI 내에서만)
+            det_mask = self.build_binary_mask(image, thr01, keep=self.keep_side).astype(np.float32)
+            det_mask = (det_mask * donut).astype(np.float32)
+            det_mask = self.filter_small_components(det_mask, min_area_ratio=self.min_area_ratio)
+            
+            # (2) 최종 keep 마스크 = (1 - donut) + det, 단 block_band는 무조건 0으로 차폐
+            keep_mask = ((1.0 - donut) + det_mask).astype(np.float32)
+            keep_mask = (keep_mask * (1.0 - block_band)).astype(np.float32)
+            
+            # 임계값에 따라 조직/블라인드존 분류
+            if self.keep_side == 'high':
+                # 밝은 영역을 검출하는 경우 - 검출된 영역은 조직
+                tissue_mask = det_mask
+                blind_zone_mask = (donut * (1.0 - det_mask) * (1.0 - block_band)).astype(np.float32)
+            else:
+                # 어두운 영역을 검출하는 경우 - 검출된 영역은 블라인드존
+                blind_zone_mask = det_mask
+                tissue_mask = (donut * (1.0 - det_mask) * (1.0 - block_band)).astype(np.float32)
+                
+            tissue_masks.append(tissue_mask)
+            blind_zone_masks.append(blind_zone_mask)
+        
+        # 여러 임계값 결과의 평균
+        if tissue_masks:
+            final_tissue_mask = np.mean(tissue_masks, axis=0)
+            final_blind_zone_mask = np.mean(blind_zone_masks, axis=0)
+            
+            # 이진화
+            final_tissue_mask = (final_tissue_mask > 0.5).astype(np.float32)
+            final_blind_zone_mask = (final_blind_zone_mask > 0.5).astype(np.float32)
+            
+            # 후처리
+            final_tissue_mask = self.filter_small_components(final_tissue_mask, min_area_ratio=self.min_area_ratio)
+            final_blind_zone_mask = self.filter_small_components(final_blind_zone_mask, min_area_ratio=self.min_area_ratio)
+            
+            return final_tissue_mask, final_blind_zone_mask
+        else:
+            return np.zeros_like(image), np.zeros_like(image)
 
 
 # Second UltrasoundBlindZoneWithNoise class removed to avoid conflicts
@@ -1137,7 +1446,7 @@ class UltrasoundBlindZone(H_functions):
 def create_ultrasound_h_funcs(config, version=None, noise_pattern=None, distortion_factor=0.025, noise_factor=1.0,
                              enhanced_tissue_detection=True, tissue_detection_mode='multi', clahe_clip_limit=3.0,
                              min_tissue_size_factor=1.0, complete_blind_zone_removal=True, preserve_background=True,
-                             version_thresholds=None, tissue_min_size=200, blind_zone_min_size=100):
+                             version_thresholds=None, tissue_min_size=200, blind_zone_min_size=100, filename=None):
     """Factory function to create appropriate H_functions for ultrasound"""
 
     channels = getattr(config.data, 'channels', 1)
@@ -1159,7 +1468,7 @@ def create_ultrasound_h_funcs(config, version=None, noise_pattern=None, distorti
         channels, img_size, device, version, noise_pattern, distortion_factor, noise_factor,
         enhanced_tissue_detection, tissue_detection_mode, clahe_clip_limit,
         min_tissue_size_factor, complete_blind_zone_removal, preserve_background,
-        version_thresholds, tissue_min_size, blind_zone_min_size
+        version_thresholds, tissue_min_size, blind_zone_min_size, filename
     )
 
 
@@ -1230,7 +1539,12 @@ def estimate_version_artifacts(cn_on_path, cy_on_path, version, custom_threshold
 
         # 2. z_est 추정: z_est = CY_ON - M * CN_ON
         structural_noise = (cy_img - multiplicative_map * cn_img)
-        # Create version-specific region mask for focused estimation
+        # Create version-specific region mask for focused estimation within visible region
+
+        # Create temporary UltrasoundBlindZone instance for visible region calculation
+        temp_h_funcs = UltrasoundBlindZone(1, 512, torch.device('cpu'), version, None, 0.025, 1.0, filename=current_filename)
+        visible_region = temp_h_funcs._create_visible_region_circle((512, 512), version)
+
         y, x = np.ogrid[:512, :512]
         center_y, center_x = 256, 256
 
@@ -1250,7 +1564,10 @@ def estimate_version_artifacts(cn_on_path, cy_on_path, version, custom_threshold
                     break
 
         distance = np.sqrt((x - center_x)**2 + (y - center_y)**2)
-        region_mask = ((distance >= params["inner_r"]) & (distance <= params["outer_r"])).astype(np.float32)
+        donut_region = ((distance >= params["inner_r"]) & (distance <= params["outer_r"])).astype(np.float32)
+
+        # Constrain region mask to visible region
+        region_mask = donut_region * visible_region
 
         # Detect and exclude tissue from z_est
         donut_pixels = cy_img[region_mask > 0.5]
@@ -1363,7 +1680,12 @@ def estimate_degradation_operator(cn_oy_path, cy_oy_path, z_est, version, curren
         eps = 1e-6
         h_estimate = np.divide(cy_corrected, cn_oy + eps, out=np.zeros_like(cy_corrected), where=(cn_oy + eps) != 0)
 
-        # Detect and exclude tissue from H_est
+        # Detect and exclude tissue from H_est within visible region
+
+        # Create temporary UltrasoundBlindZone instance for visible region calculation
+        temp_h_funcs = UltrasoundBlindZone(1, 512, torch.device('cpu'), version, None, 0.025, 1.0, filename=current_filename)
+        visible_region = temp_h_funcs._create_visible_region_circle((512, 512), version)
+
         y, x = np.ogrid[:512, :512]
         center_y, center_x = 256, 256
 
@@ -1383,7 +1705,10 @@ def estimate_degradation_operator(cn_oy_path, cy_oy_path, z_est, version, curren
                     break
 
         distance = np.sqrt((x - center_x)**2 + (y - center_y)**2)
-        region_mask = ((distance >= params["inner_r"]) & (distance <= params["outer_r"])).astype(np.float32)
+        donut_region = ((distance >= params["inner_r"]) & (distance <= params["outer_r"])).astype(np.float32)
+
+        # Constrain region mask to visible region
+        region_mask = donut_region * visible_region
 
         donut_pixels = cy_oy[region_mask > 0.5]
         if len(donut_pixels) > 0:

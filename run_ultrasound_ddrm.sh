@@ -63,24 +63,9 @@ NO_SAVE_IMAGES=${NO_SAVE_IMAGES:-"false"}                      # Disable saving 
 COMPLETE_BLIND_ZONE_REMOVAL=${COMPLETE_BLIND_ZONE_REMOVAL:-"false"}  # Disable complete blind zone removal for full DDRM processing
 PRESERVE_BACKGROUND=${PRESERVE_BACKGROUND:-"false"}                  # Process background for full DDRM processing
 
-# V3~V7 Donut region parameters (hardcoded donut shapes)
-# V3: Large donut (inner_r=85, outer_r=220)
-# V4: Medium-large donut (inner_r=50, outer_r=130)
-# V5: Medium donut (inner_r=30, outer_r=90)
-# V6: Small donut (inner_r=20, outer_r=60)
-# V7: Minimal donut (inner_r=15, outer_r=45)
-
-# Version-specific tissue/blind zone separation thresholds (percentiles)
-V3_TISSUE_PERCENTILE=${V3_TISSUE_PERCENTILE:-85}        # V3: Tissue threshold (65th percentile)
-V3_BLIND_ZONE_PERCENTILE=${V3_BLIND_ZONE_PERCENTILE:-50} # V3: Blind zone threshold (35th percentile)
-V4_TISSUE_PERCENTILE=${V4_TISSUE_PERCENTILE:-80}        # V4: Tissue threshold (70th percentile)
-V4_BLIND_ZONE_PERCENTILE=${V4_BLIND_ZONE_PERCENTILE:-55} # V4: Blind zone threshold (40th percentile)
-V5_TISSUE_PERCENTILE=${V5_TISSUE_PERCENTILE:-75}        # V5: Tissue threshold (75th percentile)
-V5_BLIND_ZONE_PERCENTILE=${V5_BLIND_ZONE_PERCENTILE:-60} # V5: Blind zone threshold (45th percentile)
-V6_TISSUE_PERCENTILE=${V6_TISSUE_PERCENTILE:-70}        # V6: Tissue threshold (80th percentile)
-V6_BLIND_ZONE_PERCENTILE=${V6_BLIND_ZONE_PERCENTILE:-65} # V6: Blind zone threshold (50th percentile)
-V7_TISSUE_PERCENTILE=${V7_TISSUE_PERCENTILE:-65}        # V7: Tissue threshold (85th percentile)
-V7_BLIND_ZONE_PERCENTILE=${V7_BLIND_ZONE_PERCENTILE:-70} # V7: Blind zone threshold (55th percentile)
+# V3~V7 parameters are now handled internally by the dataset building approach
+# Parameters moved to ultrasound_h_funcs.py radius_map and threshold processing
+# V3: (42, 82, 230), V4: (25, 48, 133), V5: (17, 32, 90), V6: (11, 22, 63), V7: (9, 17, 48)
 
 # Mask cleaning parameters - Enhanced for angle-aware detection
 TISSUE_MIN_SIZE=${TISSUE_MIN_SIZE:-200}                 # Minimum tissue region size (pixels)
@@ -191,12 +176,7 @@ echo "  - Tissue detection mode: $TISSUE_DETECTION_MODE"
 echo "  - CLAHE clip limit: $CLAHE_CLIP_LIMIT"
 echo "  - Complete blind zone removal: $COMPLETE_BLIND_ZONE_REMOVAL"
 echo "  - Preserve background: $PRESERVE_BACKGROUND"
-echo "  - Legacy Thresholds: V3=$THRESHOLD_V3, V4=$THRESHOLD_V4, V5=$THRESHOLD_V5, V6=$THRESHOLD_V6, V7=$THRESHOLD_V7"
-echo "  - V3 Donut Thresholds: Tissue=${V3_TISSUE_PERCENTILE}%, BlindZone=${V3_BLIND_ZONE_PERCENTILE}%"
-echo "  - V4 Donut Thresholds: Tissue=${V4_TISSUE_PERCENTILE}%, BlindZone=${V4_BLIND_ZONE_PERCENTILE}%"
-echo "  - V5 Donut Thresholds: Tissue=${V5_TISSUE_PERCENTILE}%, BlindZone=${V5_BLIND_ZONE_PERCENTILE}%"
-echo "  - V6 Donut Thresholds: Tissue=${V6_TISSUE_PERCENTILE}%, BlindZone=${V6_BLIND_ZONE_PERCENTILE}%"
-echo "  - V7 Donut Thresholds: Tissue=${V7_TISSUE_PERCENTILE}%, BlindZone=${V7_BLIND_ZONE_PERCENTILE}%"
+echo "  - V3-V7 Thresholds: Now handled by dataset building approach with radius_map"
 echo "  - Mask cleaning: Tissue min size=${TISSUE_MIN_SIZE}, Blind zone min size=${BLIND_ZONE_MIN_SIZE}"
 echo "  - Natural restoration: ${NATURAL_RESTORATION}"
 echo "  - Distortion factors: Tissue=${TISSUE_DISTORTION_FACTOR}, BlindZone=${BLIND_ZONE_DISTORTION_FACTOR}, Background=${BACKGROUND_DISTORTION_FACTOR}"
@@ -235,16 +215,6 @@ python ultrasound_main.py \
     --min_tissue_size_factor $MIN_TISSUE_SIZE_FACTOR \
     $([ "$COMPLETE_BLIND_ZONE_REMOVAL" = "true" ] && echo "--complete_blind_zone_removal") \
     $([ "$PRESERVE_BACKGROUND" = "true" ] && echo "--preserve_background") \
-    --v3_tissue_percentile $V3_TISSUE_PERCENTILE \
-    --v3_blind_zone_percentile $V3_BLIND_ZONE_PERCENTILE \
-    --v4_tissue_percentile $V4_TISSUE_PERCENTILE \
-    --v4_blind_zone_percentile $V4_BLIND_ZONE_PERCENTILE \
-    --v5_tissue_percentile $V5_TISSUE_PERCENTILE \
-    --v5_blind_zone_percentile $V5_BLIND_ZONE_PERCENTILE \
-    --v6_tissue_percentile $V6_TISSUE_PERCENTILE \
-    --v6_blind_zone_percentile $V6_BLIND_ZONE_PERCENTILE \
-    --v7_tissue_percentile $V7_TISSUE_PERCENTILE \
-    --v7_blind_zone_percentile $V7_BLIND_ZONE_PERCENTILE \
     --tissue_min_size $TISSUE_MIN_SIZE \
     --blind_zone_min_size $BLIND_ZONE_MIN_SIZE \
     --cn_on_path $CN_ON_PATH \
@@ -268,11 +238,8 @@ echo "1. z_est = Average(CY_ON - CN_ON): Structural noise estimation"
 echo "2. H_est = argmin_H ||H·(CN_OY) - (CY_OY - z_est)||²: Distortion operator estimation"
 echo "3. Physics-based modeling: Blind zone as physical distortion, not masking"
 echo "4. V3-V7 Donut-based tissue/blind zone separation:"
-echo "   - V3: Large donut (inner_r=85, outer_r=220) with ${V3_TISSUE_PERCENTILE}%/${V3_BLIND_ZONE_PERCENTILE}% thresholds"
-echo "   - V4: Med-Large donut (inner_r=50, outer_r=130) with ${V4_TISSUE_PERCENTILE}%/${V4_BLIND_ZONE_PERCENTILE}% thresholds"
-echo "   - V5: Medium donut (inner_r=30, outer_r=90) with ${V5_TISSUE_PERCENTILE}%/${V5_BLIND_ZONE_PERCENTILE}% thresholds"
-echo "   - V6: Small donut (inner_r=20, outer_r=60) with ${V6_TISSUE_PERCENTILE}%/${V6_BLIND_ZONE_PERCENTILE}% thresholds"
-echo "   - V7: Minimal donut (inner_r=15, outer_r=45) with ${V7_TISSUE_PERCENTILE}%/${V7_BLIND_ZONE_PERCENTILE}% thresholds"
+echo "   - V3: (42, 82, 230), V4: (25, 48, 133), V5: (17, 32, 90), V6: (11, 22, 63), V7: (9, 17, 48)"
+echo "   - Thresholds managed by dataset building method with Otsu and percentile processing"
 echo "5. Natural physics-based restoration:"
 echo "   - Tissue: Protected with ${TISSUE_DISTORTION_FACTOR}x distortion and ${TISSUE_NOISE_FACTOR}x noise"
 echo "   - Blind zone: Standard restoration with ${BLIND_ZONE_DISTORTION_FACTOR}x distortion and ${BLIND_ZONE_NOISE_FACTOR}x noise"

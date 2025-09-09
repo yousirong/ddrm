@@ -90,7 +90,7 @@ class UltrasoundDDRMRunner(Diffusion):
 
             # Step 1: Structural noise estimation z_est
             custom_threshold = self.custom_thresholds.get(version, None)
-            z_est, distortion_map = estimate_version_artifacts(cn_on_path, cy_on_path, version, custom_threshold)
+            z_est, distortion_map = estimate_version_artifacts(cn_on_path, cy_on_path, version, custom_threshold, current_filename="estimation_mode")
 
             if z_est is not None:
                 self.version_artifacts[version] = {
@@ -101,7 +101,7 @@ class UltrasoundDDRMRunner(Diffusion):
 
                 # Step 2: Degradation operator estimation H_est (if OY data available)
                 if cn_oy_path and cy_oy_path:
-                    H_est = estimate_degradation_operator(cn_oy_path, cy_oy_path, z_est, version)
+                    H_est = estimate_degradation_operator(cn_oy_path, cy_oy_path, z_est, version, current_filename="estimation_mode")
                     if H_est is not None:
                         self.version_degradation_ops[version] = H_est
                         logger.info(f"{version} degradation operator H_est estimated")
@@ -118,7 +118,7 @@ class UltrasoundDDRMRunner(Diffusion):
                 return version
         return None
 
-    def create_h_functions(self, version=None):
+    def create_h_functions(self, version=None, filename=None):
         """Create version-specific H_functions for ultrasound"""
         noise_pattern = None
 
@@ -136,33 +136,9 @@ class UltrasoundDDRMRunner(Diffusion):
         distortion_factor = getattr(self.args, 'distortion_factor', 0.025)
         noise_factor = getattr(self.args, 'noise_factor', 1.0)
 
-        # Get V3~V7 도넛 기반 파라미터들
-        version_thresholds = {}
-        if hasattr(self.args, 'v3_tissue_percentile'):
-            version_thresholds['V3'] = {
-                'tissue_percentile': self.args.v3_tissue_percentile,
-                'blind_zone_percentile': getattr(self.args, 'v3_blind_zone_percentile', 35)
-            }
-        if hasattr(self.args, 'v4_tissue_percentile'):
-            version_thresholds['V4'] = {
-                'tissue_percentile': self.args.v4_tissue_percentile,
-                'blind_zone_percentile': getattr(self.args, 'v4_blind_zone_percentile', 40)
-            }
-        if hasattr(self.args, 'v5_tissue_percentile'):
-            version_thresholds['V5'] = {
-                'tissue_percentile': self.args.v5_tissue_percentile,
-                'blind_zone_percentile': getattr(self.args, 'v5_blind_zone_percentile', 45)
-            }
-        if hasattr(self.args, 'v6_tissue_percentile'):
-            version_thresholds['V6'] = {
-                'tissue_percentile': self.args.v6_tissue_percentile,
-                'blind_zone_percentile': getattr(self.args, 'v6_blind_zone_percentile', 50)
-            }
-        if hasattr(self.args, 'v7_tissue_percentile'):
-            version_thresholds['V7'] = {
-                'tissue_percentile': self.args.v7_tissue_percentile,
-                'blind_zone_percentile': getattr(self.args, 'v7_blind_zone_percentile', 55)
-            }
+        # Version-specific thresholds are now handled directly in the dataset building methods
+        # No need to pass percentile parameters - they are managed internally
+        version_thresholds = None  # Not used with dataset building approach
 
         # Get mask cleaning parameters
         tissue_min_size = getattr(self.args, 'tissue_min_size', 200)
@@ -180,7 +156,7 @@ class UltrasoundDDRMRunner(Diffusion):
             self.config, version, noise_pattern, distortion_factor, noise_factor,
             enhanced_tissue_detection, tissue_detection_mode, clahe_clip_limit,
             min_tissue_size_factor, complete_blind_zone_removal, preserve_background,
-            version_thresholds, tissue_min_size, blind_zone_min_size
+            version_thresholds, tissue_min_size, blind_zone_min_size, filename
         )
 
     def sample_ultrasound_sequence(self, test_images_path, output_dir, sigma_0=0.05, save_steps=None, optuna_mode=False, no_save_images=False):
@@ -225,7 +201,7 @@ class UltrasoundDDRMRunner(Diffusion):
             logger.info(f"Detected version: {version}")
 
             # Create version-specific H_functions
-            H_funcs = self.create_h_functions(version)
+            H_funcs = self.create_h_functions(version, image_path.name)
 
             # Prepare image tensor with proper normalization
             img_array = np.array(image) / 255.0  # Normalize to [0, 1]
@@ -338,9 +314,9 @@ class UltrasoundDDRMRunner(Diffusion):
 
                 logger.info(f"Final image range: Min: {restored_tensor.min():.3f}, Max: {restored_tensor.max():.3f}, Mean: {restored_tensor.mean():.3f}")
 
-                # Apply tissue enhancement post-processing - 조직을 원본처럼 밝게 복원
-                #if H_funcs.tissue_mask is not None:
-                #    restored_tensor = self._enhance_tissue_pixels(restored_tensor, H_funcs.tissue_mask, x_orig.squeeze().cpu(), version)
+                # Apply original color restoration for non-blind-zone areas
+                if H_funcs.tissue_mask is not None:
+                    restored_tensor = self._restore_original_colors(restored_tensor, H_funcs.tissue_mask, H_funcs.blind_zone_processing_mask, x_orig.squeeze().cpu(), version)
 
                 # Save restored image to disk or temporary numpy file
                 restored_path = None
@@ -487,6 +463,73 @@ class UltrasoundDDRMRunner(Diffusion):
 
         # torch.Tensor로 변환하여 반환
         return torch.from_numpy(enhanced_np).float()
+
+    def _restore_original_colors(self, restored_image, tissue_mask, blind_zone_mask, original_image, version):
+        """
+        Restore original pixel values in tissue and background areas (non-blind-zone areas)
+        Only blind zone areas should use the restored values
+        """
+        if tissue_mask is None or blind_zone_mask is None:
+            logger.info("마스크가 없어 원본 색상 복원을 건너뜁니다")
+            return restored_image
+
+        # Convert tensors to numpy for processing
+        if isinstance(restored_image, torch.Tensor):
+            restored_np = restored_image.cpu().numpy()
+        else:
+            restored_np = restored_image
+
+        if isinstance(original_image, torch.Tensor):
+            original_np = original_image.cpu().numpy()
+        else:
+            original_np = original_image
+
+        if isinstance(tissue_mask, torch.Tensor):
+            tissue_np = tissue_mask.cpu().numpy()
+        else:
+            tissue_np = tissue_mask
+
+        if isinstance(blind_zone_mask, torch.Tensor):
+            blind_zone_np = blind_zone_mask.cpu().numpy()
+        else:
+            blind_zone_np = blind_zone_mask
+
+        # Ensure 2D shape
+        if len(restored_np.shape) == 3:
+            restored_np = restored_np[0]
+        if len(original_np.shape) == 3:
+            original_np = original_np[0]
+
+        # Create result starting with restored image
+        result_np = restored_np.copy()
+        
+        # Define areas where original colors should be preserved
+        tissue_region = tissue_np > 0.1
+        blind_zone_region = blind_zone_np > 0.1
+        background_region = (~tissue_region) & (~blind_zone_region)
+        
+        # Areas that should keep original colors: tissue + background (not blind zone)
+        preserve_original = tissue_region | background_region
+        
+        # Restore original pixel values in tissue and background areas
+        result_np[preserve_original] = original_np[preserve_original]
+        
+        tissue_count = np.sum(tissue_region)
+        blind_count = np.sum(blind_zone_region) 
+        background_count = np.sum(background_region)
+        preserved_count = np.sum(preserve_original)
+        
+        logger.info(f"{version} 원본 색상 복원 완료:")
+        logger.info(f"  - 조직 영역 (원본 유지): {tissue_count}개 픽셀")
+        logger.info(f"  - 배경 영역 (원본 유지): {background_count}개 픽셀") 
+        logger.info(f"  - 블라인드존 (복원 사용): {blind_count}개 픽셀")
+        logger.info(f"  - 총 원본 색상 유지: {preserved_count}개 픽셀 ({preserved_count/(512*512)*100:.1f}%)")
+
+        # Clamp values
+        result_np = np.clip(result_np, 0, 1)
+
+        # Convert back to tensor
+        return torch.from_numpy(result_np).float()
     def _load_test_images(self, test_path, optuna_mode=False):
         """Load test images with version detection - Optuna 모드에서는 10개만 로드"""
         test_path = Path(test_path)
@@ -625,6 +668,9 @@ class UltrasoundDDRMRunner(Diffusion):
             axes[1,2].axis('off')
             plt.colorbar(im, ax=axes[1,2], shrink=0.6)
 
+            # 가시 영역 shift 정보 가져오기
+            angle_offset = H_funcs._get_angle_center_offset()
+            
             # 기본 버전 정보
             version_info = {
                 'V3': 'Large Blind Zone\nStrong Distortion',
@@ -637,6 +683,9 @@ class UltrasoundDDRMRunner(Diffusion):
             version_text = f"""{version} Characteristics:
 
 {version_info.get(version, 'Unknown Version')}
+
+Visible Region Shift:
+• Center offset: ({angle_offset['x']:+d}, {angle_offset['y']:+d}) px
 
 Processing Method:
 ✓ Tissue protection activated
@@ -673,6 +722,10 @@ Processing Method:
 • Protected Tissue: {protected_coverage:.1f}%
 • Pure Blind Zone: {pure_blind_coverage:.1f}%
 
+Spatial Configuration:
+• Visible region shift: ({angle_offset['x']:+d}, {angle_offset['y']:+d}) pixels
+• Detection center adjusted for angle
+
 Processing Strategy:
 → Tissue Area: 20-60% gentle correction
 → Pure Blind Zone: 120-200% strong correction
@@ -695,16 +748,37 @@ Protection Effect:
             axes[2,2].set_xlabel('Processing Strength')
             axes[2,2].set_ylabel('Pixel Count')
 
-            # 마스크 겹침 분석
-            overlap_data = {
-                'Tissue Only': np.sum((tissue_mask > 0.5) & (full_blind_zone == 0)),
-                'Blind Zone Only': np.sum((tissue_mask == 0) & (full_blind_zone > 0.5)),
-                'Tissue+Blind Zone': np.sum((tissue_mask > 0.5) & (full_blind_zone > 0.5)),
-                'Background': np.sum((tissue_mask == 0) & (full_blind_zone == 0))
+            # 가시 영역 시각화 (수정된 shift 적용)
+            height, width = orig_np.shape
+            center_y, center_x = height // 2, width // 2
+            shifted_center_y = center_y + angle_offset['y']
+            shifted_center_x = center_x + angle_offset['x']
+            
+            # 올바른 shifted center로 가시 영역 원 생성
+            y, x = np.ogrid[:height, :width]
+            distance = np.sqrt((x - shifted_center_x)**2 + (y - shifted_center_y)**2)
+            
+            version_visible_radius = {
+                'V3': 240, 'V4': 150, 'V5': 110, 'V6': 80, 'V7': 65
             }
-
-            axes[2,3].pie(overlap_data.values(), labels=overlap_data.keys(), autopct='%1.1f%%', startangle=90)
-            axes[2,3].set_title('Region Distribution')
+            visible_radius = version_visible_radius.get(version, 110)
+            visible_region = (distance <= visible_radius).astype(np.float32)
+            
+            # 가시 영역과 도넛 영역을 함께 표시
+            axes[2,3].imshow(orig_np, cmap='gray', alpha=0.6)
+            axes[2,3].contour(visible_region, levels=[0.5], colors=['cyan'], linewidths=2, linestyles='-')
+            axes[2,3].contour(full_blind_zone, levels=[0.1], colors=['blue'], linewidths=1, linestyles='--')
+            
+            # 중심점 표시
+            
+            axes[2,3].plot(center_x, center_y, 'ro', markersize=8, label='Original Center')
+            axes[2,3].plot(shifted_center_x, shifted_center_y, 'co', markersize=8, label='Shifted Center')
+            axes[2,3].arrow(center_x, center_y, angle_offset['x'], angle_offset['y'], 
+                           head_width=10, head_length=8, fc='yellow', ec='orange', linewidth=2)
+            
+            axes[2,3].set_title(f'Visible Region Shift\nCyan: Visible Circle, Blue: Blind Zone')
+            axes[2,3].legend(loc='upper right', fontsize=8)
+            axes[2,3].axis('off')
 
             # 저장
             analysis_path = output_dir / f"{image_path.stem}_tissue_analysis_{version}.png"

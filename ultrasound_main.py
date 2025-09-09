@@ -197,47 +197,9 @@ def parse_args_and_config():
         help="Preserve background areas unchanged"
     )
     
-    # V3~V7 Donut-based tissue/blind zone separation parameters
-    parser.add_argument(
-        "--v3_tissue_percentile", type=float, default=65,
-        help="V3 tissue separation threshold (percentile, default: 65)"
-    )
-    parser.add_argument(
-        "--v3_blind_zone_percentile", type=float, default=35,
-        help="V3 blind zone separation threshold (percentile, default: 35)"
-    )
-    parser.add_argument(
-        "--v4_tissue_percentile", type=float, default=70,
-        help="V4 tissue separation threshold (percentile, default: 70)"
-    )
-    parser.add_argument(
-        "--v4_blind_zone_percentile", type=float, default=40,
-        help="V4 blind zone separation threshold (percentile, default: 40)"
-    )
-    parser.add_argument(
-        "--v5_tissue_percentile", type=float, default=75,
-        help="V5 tissue separation threshold (percentile, default: 75)"
-    )
-    parser.add_argument(
-        "--v5_blind_zone_percentile", type=float, default=45,
-        help="V5 blind zone separation threshold (percentile, default: 45)"
-    )
-    parser.add_argument(
-        "--v6_tissue_percentile", type=float, default=80,
-        help="V6 tissue separation threshold (percentile, default: 80)"
-    )
-    parser.add_argument(
-        "--v6_blind_zone_percentile", type=float, default=50,
-        help="V6 blind zone separation threshold (percentile, default: 50)"
-    )
-    parser.add_argument(
-        "--v7_tissue_percentile", type=float, default=85,
-        help="V7 tissue separation threshold (percentile, default: 85)"
-    )
-    parser.add_argument(
-        "--v7_blind_zone_percentile", type=float, default=55,
-        help="V7 blind zone separation threshold (percentile, default: 55)"
-    )
+    # Note: V3~V7 tissue/blind zone separation parameters are now handled internally
+    # by the dataset building approach in ultrasound_h_funcs.py
+    # Parameters have been moved to the radius_map and threshold processing methods
     
     # Mask cleaning parameters
     parser.add_argument(
@@ -362,11 +324,7 @@ def main():
     logging.info(f"  - Sigma_0: {args.sigma_0}")
     logging.info(f"  - Distortion factor: {args.distortion_factor}")
     logging.info(f"  - Noise factor: {args.noise_factor}")
-    logging.info(f"  - Threshold V3: {args.threshold_v3}")
-    logging.info(f"  - Threshold V4: {args.threshold_v4}")
-    logging.info(f"  - Threshold V5: {args.threshold_v5}")
-    logging.info(f"  - Threshold V6: {args.threshold_v6}")
-    logging.info(f"  - Threshold V7: {args.threshold_v7}")
+    logging.info(f"  - V3-V7 thresholds: Now handled by dataset building approach")
     if args.save_steps:
         logging.info(f"  - Save intermediate steps: {args.save_steps}")
 

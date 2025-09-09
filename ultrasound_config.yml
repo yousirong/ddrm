@@ -1,3 +1,5 @@
+# Ultrasound DDRM Configuration with Dataset Building Integration
+# Updated to work with integrated mask generation from build_*_dataset.py
 model:
   type: simple
   model_path: /home/ubuntu/Desktop/JY/ultrasound_inp/diffusers/ddpm-ultrasound-512-a100/best_model/unet
@@ -29,6 +31,7 @@ data:
   random_flip: false
   rescaled: true
   num_workers: 4
+  # V3-V7 mask generation now handled by integrated dataset building approach
 
 sampling:
   method: ddpm
