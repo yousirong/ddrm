@@ -50,6 +50,7 @@ class UltrasoundBlindZone(H_functions):
         # 조직 보호 관련 변수들 (H/H_pinv는 변경하지 않고 디노이징에서만 사용)
         self.tissue_mask = None
         self.blind_zone_processing_mask = None
+        self.current_filename = None  # 현재 처리 중인 파일명 저장
 
         # Enhanced version-specific parameters based on blind zone physics
         # (outer_radius, inner_radius, distortion_strength, noise_level)
@@ -96,6 +97,11 @@ class UltrasoundBlindZone(H_functions):
         """
         y, x = np.ogrid[:height, :width]
         center_y, center_x = height // 2, width // 2
+        
+        # PL(tilted) 각도별 중심점 이동 적용
+        angle_offset = self._get_angle_center_offset()
+        center_y += angle_offset['y']
+        center_x += angle_offset['x']
 
         distance = np.sqrt((x - center_x)**2 + (y - center_y)**2)
 
@@ -185,9 +191,16 @@ class UltrasoundBlindZone(H_functions):
         """
         V3~V7 버전별 도넛 형태 영역 생성 (하드코딩)
         조직과 블라인드존이 모두 있는 영역
+        PL(tilted) 각도별 중심점 이동 적용
         """
         height, width = shape
         center_y, center_x = height // 2, width // 2
+        
+        # 파일명에서 각도 정보 추출하여 중심점 이동 적용
+        angle_offset = self._get_angle_center_offset()
+        center_y += angle_offset['y']
+        center_x += angle_offset['x']
+        
         y, x = np.ogrid[:height, :width]
         distance = np.sqrt((x - center_x)**2 + (y - center_y)**2)
 
@@ -208,9 +221,48 @@ class UltrasoundBlindZone(H_functions):
         donut_mask = ((distance >= inner_r) & (distance <= outer_r)).astype(np.float32)
 
         logger.info(f"{version} 도넛 영역 생성: inner_r={inner_r}, outer_r={outer_r}")
+        logger.info(f"  - 중심점 이동: ({angle_offset['x']:+.0f}, {angle_offset['y']:+.0f})")
         logger.info(f"  - 도넛 영역 비율: {np.sum(donut_mask) / donut_mask.size * 100:.1f}%")
 
         return donut_mask
+    
+    def _get_angle_center_offset(self):
+        """
+        PL(tilted) 각도별 중심점 이동 오프셋 계산
+        D000: 오후 3시 방향 (오른쪽)
+        D045: 오후 1시 30분 방향 (우상단)
+        D270: 오후 9시 방향 (왼쪽)
+        D315: 오후 11시 방향 (좌상단)
+        """
+        if not hasattr(self, 'current_filename') or not self.current_filename:
+            # 파일명 정보가 없으면 중심점 이동 없음
+            return {'x': 0, 'y': 0}
+        
+        filename = self.current_filename
+        
+        # 각도별 중심점 이동 (픽셀 단위, 512x512 기준)
+        angle_offsets = {
+            'D000': {'x': 80, 'y': 0},      # 오후 3시 방향 (우측으로 이동)
+            'D045': {'x': 60, 'y': -60},    # 오후 1시 30분 방향 (우상단)
+            'D270': {'x': -80, 'y': 0},     # 오후 9시 방향 (좌측으로 이동)
+            'D315': {'x': -60, 'y': -60}    # 오후 11시 방향 (좌상단)
+        }
+        
+        # 파일명에서 각도 추출
+        for angle_key in angle_offsets.keys():
+            if angle_key in filename:
+                offset = angle_offsets[angle_key]
+                logger.info(f"각도 {angle_key} 감지: 중심점 이동 ({offset['x']:+d}, {offset['y']:+d})")
+                return offset
+        
+        # 각도 정보가 없으면 중심점 이동 없음
+        logger.info("각도 정보 없음: 중심점 이동 없음")
+        return {'x': 0, 'y': 0}
+    
+    def set_current_filename(self, filename):
+        """현재 처리 중인 파일명 설정"""
+        self.current_filename = filename
+        logger.info(f"파일명 설정: {filename}")
 
     def _separate_tissue_and_blind_zone_in_donut(self, image, donut_region, version):
         """
@@ -1051,6 +1103,12 @@ class UltrasoundBlindZone(H_functions):
             height, width = self.img_size, self.img_size
 
         center_y, center_x = height // 2, width // 2
+        
+        # PL(tilted) 각도별 중심점 이동 적용
+        angle_offset = self._get_angle_center_offset()
+        center_y += angle_offset['y']
+        center_x += angle_offset['x']
+        
         y, x = np.ogrid[:height, :width]
         distance = np.sqrt((x - center_x)**2 + (y - center_y)**2)
 
@@ -1105,12 +1163,14 @@ def create_ultrasound_h_funcs(config, version=None, noise_pattern=None, distorti
     )
 
 
-def estimate_version_artifacts(cn_on_path, cy_on_path, version, custom_threshold=None):
+def estimate_version_artifacts(cn_on_path, cy_on_path, version, custom_threshold=None, current_filename=None):
     """
     Enhanced structural noise estimation: z_est = Average(CY_ON - CN_ON)
     Implements version-specific (V3-V7) blind zone artifact estimation, excluding tissue regions.
     """
     logger.info(f"Estimating structural noise artifacts for version {version}")
+    if current_filename:
+        logger.info(f"Processing filename: {current_filename}")
 
     # Load version-specific images with better pattern matching
     cn_files = []
@@ -1173,6 +1233,22 @@ def estimate_version_artifacts(cn_on_path, cy_on_path, version, custom_threshold
         # Create version-specific region mask for focused estimation
         y, x = np.ogrid[:512, :512]
         center_y, center_x = 256, 256
+        
+        # PL(tilted) 각도별 중심점 이동 적용
+        if current_filename:
+            angle_offsets = {
+                'D000': {'x': 80, 'y': 0},      # 오후 3시 방향 (우측으로 이동)
+                'D045': {'x': 60, 'y': -60},    # 오후 1시 30분 방향 (우상단)
+                'D270': {'x': -80, 'y': 0},     # 오후 9시 방향 (좌측으로 이동)
+                'D315': {'x': -60, 'y': -60}    # 오후 11시 방향 (좌상단)
+            }
+            for angle_key, offset in angle_offsets.items():
+                if angle_key in current_filename:
+                    center_y += offset['y']
+                    center_x += offset['x']
+                    logger.info(f"각도 {angle_key} 감지: z_est 중심점 이동 ({offset['x']:+d}, {offset['y']:+d})")
+                    break
+        
         distance = np.sqrt((x - center_x)**2 + (y - center_y)**2)
         region_mask = ((distance >= params["inner_r"]) & (distance <= params["outer_r"])).astype(np.float32)
 
@@ -1223,12 +1299,14 @@ def estimate_version_artifacts(cn_on_path, cy_on_path, version, custom_threshold
         return None, None
 
 
-def estimate_degradation_operator(cn_oy_path, cy_oy_path, z_est, version):
+def estimate_degradation_operator(cn_oy_path, cy_oy_path, z_est, version, current_filename=None):
     """
     Enhanced degradation operator estimation:
     H_est = argmin_H ||H·(CN_OY) - (CY_OY - z_est)||², excluding tissue regions.
     """
     logger.info(f"Estimating degradation operator H_est for version {version}")
+    if current_filename:
+        logger.info(f"Processing filename: {current_filename}")
 
     if z_est is None:
         logger.error("Structural noise z_est not provided")
@@ -1288,6 +1366,22 @@ def estimate_degradation_operator(cn_oy_path, cy_oy_path, z_est, version):
         # Detect and exclude tissue from H_est
         y, x = np.ogrid[:512, :512]
         center_y, center_x = 256, 256
+        
+        # PL(tilted) 각도별 중심점 이동 적용
+        if current_filename:
+            angle_offsets = {
+                'D000': {'x': 80, 'y': 0},      # 오후 3시 방향 (우측으로 이동)
+                'D045': {'x': 60, 'y': -60},    # 오후 1시 30분 방향 (우상단)
+                'D270': {'x': -80, 'y': 0},     # 오후 9시 방향 (좌측으로 이동)
+                'D315': {'x': -60, 'y': -60}    # 오후 11시 방향 (좌상단)
+            }
+            for angle_key, offset in angle_offsets.items():
+                if angle_key in current_filename:
+                    center_y += offset['y']
+                    center_x += offset['x']
+                    logger.info(f"각도 {angle_key} 감지: H_est 중심점 이동 ({offset['x']:+d}, {offset['y']:+d})")
+                    break
+        
         distance = np.sqrt((x - center_x)**2 + (y - center_y)**2)
         region_mask = ((distance >= params["inner_r"]) & (distance <= params["outer_r"])).astype(np.float32)
 
