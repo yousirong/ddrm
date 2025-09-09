@@ -97,7 +97,7 @@ class UltrasoundBlindZone(H_functions):
         """
         y, x = np.ogrid[:height, :width]
         center_y, center_x = height // 2, width // 2
-        
+
         # PL(tilted) 각도별 중심점 이동 적용
         angle_offset = self._get_angle_center_offset()
         center_y += angle_offset['y']
@@ -195,12 +195,12 @@ class UltrasoundBlindZone(H_functions):
         """
         height, width = shape
         center_y, center_x = height // 2, width // 2
-        
+
         # 파일명에서 각도 정보 추출하여 중심점 이동 적용
         angle_offset = self._get_angle_center_offset()
         center_y += angle_offset['y']
         center_x += angle_offset['x']
-        
+
         y, x = np.ogrid[:height, :width]
         distance = np.sqrt((x - center_x)**2 + (y - center_y)**2)
 
@@ -225,7 +225,7 @@ class UltrasoundBlindZone(H_functions):
         logger.info(f"  - 도넛 영역 비율: {np.sum(donut_mask) / donut_mask.size * 100:.1f}%")
 
         return donut_mask
-    
+
     def _get_angle_center_offset(self):
         """
         PL(tilted) 각도별 중심점 이동 오프셋 계산
@@ -237,9 +237,9 @@ class UltrasoundBlindZone(H_functions):
         if not hasattr(self, 'current_filename') or not self.current_filename:
             # 파일명 정보가 없으면 중심점 이동 없음
             return {'x': 0, 'y': 0}
-        
+
         filename = self.current_filename
-        
+
         # 각도별 중심점 이동 (픽셀 단위, 512x512 기준)
         angle_offsets = {
             'D000': {'x': 80, 'y': 0},      # 오후 3시 방향 (우측으로 이동)
@@ -247,18 +247,18 @@ class UltrasoundBlindZone(H_functions):
             'D270': {'x': -80, 'y': 0},     # 오후 9시 방향 (좌측으로 이동)
             'D315': {'x': -60, 'y': -60}    # 오후 11시 방향 (좌상단)
         }
-        
+
         # 파일명에서 각도 추출
         for angle_key in angle_offsets.keys():
             if angle_key in filename:
                 offset = angle_offsets[angle_key]
                 logger.info(f"각도 {angle_key} 감지: 중심점 이동 ({offset['x']:+d}, {offset['y']:+d})")
                 return offset
-        
+
         # 각도 정보가 없으면 중심점 이동 없음
         logger.info("각도 정보 없음: 중심점 이동 없음")
         return {'x': 0, 'y': 0}
-    
+
     def set_current_filename(self, filename):
         """현재 처리 중인 파일명 설정"""
         self.current_filename = filename
@@ -1103,12 +1103,12 @@ class UltrasoundBlindZone(H_functions):
             height, width = self.img_size, self.img_size
 
         center_y, center_x = height // 2, width // 2
-        
+
         # PL(tilted) 각도별 중심점 이동 적용
         angle_offset = self._get_angle_center_offset()
         center_y += angle_offset['y']
         center_x += angle_offset['x']
-        
+
         y, x = np.ogrid[:height, :width]
         distance = np.sqrt((x - center_x)**2 + (y - center_y)**2)
 
@@ -1233,7 +1233,7 @@ def estimate_version_artifacts(cn_on_path, cy_on_path, version, custom_threshold
         # Create version-specific region mask for focused estimation
         y, x = np.ogrid[:512, :512]
         center_y, center_x = 256, 256
-        
+
         # PL(tilted) 각도별 중심점 이동 적용
         if current_filename:
             angle_offsets = {
@@ -1248,7 +1248,7 @@ def estimate_version_artifacts(cn_on_path, cy_on_path, version, custom_threshold
                     center_x += offset['x']
                     logger.info(f"각도 {angle_key} 감지: z_est 중심점 이동 ({offset['x']:+d}, {offset['y']:+d})")
                     break
-        
+
         distance = np.sqrt((x - center_x)**2 + (y - center_y)**2)
         region_mask = ((distance >= params["inner_r"]) & (distance <= params["outer_r"])).astype(np.float32)
 
@@ -1366,7 +1366,7 @@ def estimate_degradation_operator(cn_oy_path, cy_oy_path, z_est, version, curren
         # Detect and exclude tissue from H_est
         y, x = np.ogrid[:512, :512]
         center_y, center_x = 256, 256
-        
+
         # PL(tilted) 각도별 중심점 이동 적용
         if current_filename:
             angle_offsets = {
@@ -1381,7 +1381,7 @@ def estimate_degradation_operator(cn_oy_path, cy_oy_path, z_est, version, curren
                     center_x += offset['x']
                     logger.info(f"각도 {angle_key} 감지: H_est 중심점 이동 ({offset['x']:+d}, {offset['y']:+d})")
                     break
-        
+
         distance = np.sqrt((x - center_x)**2 + (y - center_y)**2)
         region_mask = ((distance >= params["inner_r"]) & (distance <= params["outer_r"])).astype(np.float32)
 
