@@ -10,6 +10,13 @@ from pathlib import Path
 from PIL import Image
 from diffusers import UNet2DModel
 
+# Import cv2 for image processing
+try:
+    import cv2
+except ImportError:
+    print("Warning: cv2 not available for runner. Please install opencv-python.")
+    cv2 = None
+
 # Configure matplotlib for English fonts
 import matplotlib
 matplotlib.use('Agg')  # Use non-interactive backend
@@ -55,6 +62,11 @@ class UltrasoundDDRMRunner(Diffusion):
         # Version-specific noise and degradation operators
         self.version_artifacts = {}
         self.version_degradation_ops = {}
+
+        # Initialize registration cache
+        self.registration_cache = {}
+        self.cache_file = Path('registration_cache.json')
+        self._load_registration_cache()
 
         # Extract custom thresholds from args
         self.custom_thresholds = {}
@@ -156,10 +168,10 @@ class UltrasoundDDRMRunner(Diffusion):
             self.config, version, noise_pattern, distortion_factor, noise_factor,
             enhanced_tissue_detection, tissue_detection_mode, clahe_clip_limit,
             min_tissue_size_factor, complete_blind_zone_removal, preserve_background,
-            version_thresholds, tissue_min_size, blind_zone_min_size, filename
+            version_thresholds, tissue_min_size, blind_zone_min_size, filename, self
         )
 
-    def sample_ultrasound_sequence(self, test_images_path, output_dir, sigma_0=0.05, save_steps=None, optuna_mode=False, no_save_images=False):
+    def sample_ultrasound_sequence(self, test_images_path, output_dir, sigma_0=0.05, save_steps=None, optuna_mode=False, no_save_images=False, reference_path=None):
         """
         Enhanced sampling sequence for ultrasound images
         Uses version-specific processing and physics-based modeling
@@ -187,7 +199,7 @@ class UltrasoundDDRMRunner(Diffusion):
             temp_dir.mkdir(exist_ok=True)
 
         # Load test images (Optuna 모드에서는 10개만)
-        test_images = self._load_test_images(test_images_path, optuna_mode)
+        test_images = self._load_test_images(test_images_path, optuna_mode, reference_path)
         logger.info(f"Loaded {len(test_images)} test images{' (Optuna mode - 10 images only)' if optuna_mode else ''}")
 
         # Process each image with version-specific handling
@@ -202,6 +214,10 @@ class UltrasoundDDRMRunner(Diffusion):
 
             # Create version-specific H_functions
             H_funcs = self.create_h_functions(version, image_path.name)
+
+            # Save individual artifacts for this image
+            artifacts_dir = output_dir / "artifacts"
+            self._save_individual_artifacts(image_path.name, H_funcs, artifacts_dir)
 
             # Prepare image tensor with proper normalization
             img_array = np.array(image) / 255.0  # Normalize to [0, 1]
@@ -466,72 +482,62 @@ class UltrasoundDDRMRunner(Diffusion):
 
     def _restore_original_colors(self, restored_image, tissue_mask, blind_zone_mask, original_image, version):
         """
-        Restore original pixel values in tissue and background areas (non-blind-zone areas)
-        Only blind zone areas should use the restored values
+        Restore original pixel values in non-blind-zone areas using smooth alpha blending
+        to prevent hard edges.
         """
-        if tissue_mask is None or blind_zone_mask is None:
-            logger.info("마스크가 없어 원본 색상 복원을 건너뜁니다")
+        if blind_zone_mask is None:
+            logger.info("블라인드존 마스크가 없어 원본 색상 복원을 건너뜁니다")
             return restored_image
 
-        # Convert tensors to numpy for processing
-        if isinstance(restored_image, torch.Tensor):
-            restored_np = restored_image.cpu().numpy()
-        else:
-            restored_np = restored_image
+        # Ensure tensors are on the same device
+        if not isinstance(restored_image, torch.Tensor):
+            restored_image = torch.from_numpy(restored_image)
+        restored_image = restored_image.to(self.device)
 
-        if isinstance(original_image, torch.Tensor):
-            original_np = original_image.cpu().numpy()
-        else:
-            original_np = original_image
+        if not isinstance(original_image, torch.Tensor):
+            original_image = torch.from_numpy(original_image)
+        original_image = original_image.to(self.device)
 
-        if isinstance(tissue_mask, torch.Tensor):
-            tissue_np = tissue_mask.cpu().numpy()
-        else:
-            tissue_np = tissue_mask
-
+        # Ensure mask is a numpy array for cv2 processing
         if isinstance(blind_zone_mask, torch.Tensor):
             blind_zone_np = blind_zone_mask.cpu().numpy()
         else:
             blind_zone_np = blind_zone_mask
 
-        # Ensure 2D shape
-        if len(restored_np.shape) == 3:
-            restored_np = restored_np[0]
-        if len(original_np.shape) == 3:
-            original_np = original_np[0]
+        # Ensure correct shape for processing (handle batches)
+        if len(restored_image.shape) == 4: # B, C, H, W
+             restored_image = restored_image.squeeze(0) # C, H, W
+        if len(original_image.shape) == 4:
+             original_image = original_image.squeeze(0)
+        if len(blind_zone_np.shape) == 3:
+            blind_zone_np = blind_zone_np[0]
 
-        # Create result starting with restored image
-        result_np = restored_np.copy()
-        
-        # Define areas where original colors should be preserved
-        tissue_region = tissue_np > 0.1
-        blind_zone_region = blind_zone_np > 0.1
-        background_region = (~tissue_region) & (~blind_zone_region)
-        
-        # Areas that should keep original colors: tissue + background (not blind zone)
-        preserve_original = tissue_region | background_region
-        
-        # Restore original pixel values in tissue and background areas
-        result_np[preserve_original] = original_np[preserve_original]
-        
-        tissue_count = np.sum(tissue_region)
-        blind_count = np.sum(blind_zone_region) 
-        background_count = np.sum(background_region)
-        preserved_count = np.sum(preserve_original)
-        
-        logger.info(f"{version} 원본 색상 복원 완료:")
-        logger.info(f"  - 조직 영역 (원본 유지): {tissue_count}개 픽셀")
-        logger.info(f"  - 배경 영역 (원본 유지): {background_count}개 픽셀") 
-        logger.info(f"  - 블라인드존 (복원 사용): {blind_count}개 픽셀")
-        logger.info(f"  - 총 원본 색상 유지: {preserved_count}개 픽셀 ({preserved_count/(512*512)*100:.1f}%)")
+        # Blur the blind zone mask to create a smooth alpha mask for blending.
+        if cv2 is not None:
+            # A larger kernel/sigma creates a more gradual transition.
+            alpha_mask_np = cv2.GaussianBlur(blind_zone_np.astype(np.float32), (21, 21), 7)
+        else:
+            logger.warning("cv2 not available, blending will have a hard edge.")
+            alpha_mask_np = blind_zone_np.astype(np.float32)
 
-        # Clamp values
-        result_np = np.clip(result_np, 0, 1)
+        # Convert the smoothed numpy mask back to a tensor on the correct device
+        alpha_mask = torch.from_numpy(alpha_mask_np).to(self.device)
 
-        # Convert back to tensor
-        return torch.from_numpy(result_np).float()
-    def _load_test_images(self, test_path, optuna_mode=False):
-        """Load test images with version detection - Optuna 모드에서는 10개만 로드"""
+        # Ensure alpha_mask has the same dimensions as the images for broadcasting (C, H, W)
+        if len(alpha_mask.shape) < len(restored_image.shape):
+             alpha_mask = alpha_mask.unsqueeze(0)
+
+        # Alpha blend:
+        # Where alpha_mask is 1 (center of blind zone), use restored_image.
+        # Where alpha_mask is 0 (far from blind zone), use original_image.
+        blended_image = restored_image * alpha_mask + original_image * (1.0 - alpha_mask)
+
+        logger.info(f"{version} 원본 색상 부드럽게 복원 완료 (Alpha Blending).")
+
+        # Clamp final values and return as tensor
+        return blended_image.clamp(0, 1)
+    def _load_test_images(self, test_path, optuna_mode=False, reference_path=None):
+        """Load test images with target-reference subtraction preprocessing"""
         test_path = Path(test_path)
         images = []
 
@@ -548,8 +554,9 @@ class UltrasoundDDRMRunner(Diffusion):
             for pattern in target_patterns:
                 img_path = test_path / pattern
                 if img_path.exists():
-                    img = Image.open(img_path).convert('L').resize((512, 512))
-                    images.append((img_path, img))
+                    img = self._load_and_preprocess_image(img_path, reference_path)
+                    if img is not None:
+                        images.append((img_path, img))
                 else:
                     logger.warning(f"Optuna target image not found: {img_path}")
 
@@ -557,16 +564,470 @@ class UltrasoundDDRMRunner(Diffusion):
 
         elif test_path.is_file():
             # Single image
-            img = Image.open(test_path).convert('L').resize((512, 512))
-            images.append((test_path, img))
+            img = self._load_and_preprocess_image(test_path, reference_path)
+            if img is not None:
+                images.append((test_path, img))
         else:
             # Directory - 모든 이미지 로드
             for ext in ['*.bmp', '*.png', '*.jpg', '*.jpeg']:
                 for img_path in test_path.glob(ext):
-                    img = Image.open(img_path).convert('L').resize((512, 512))
-                    images.append((img_path, img))
+                    img = self._load_and_preprocess_image(img_path, reference_path)
+                    if img is not None:
+                        images.append((img_path, img))
 
         return sorted(images, key=lambda x: x[0].name)
+
+    def _load_and_preprocess_image(self, target_path, reference_path=None):
+        """
+        Load and preprocess image with donut-based registration and Otsu blind zone detection
+
+        Process:
+        1. 도넛형태 블라인드존 영역 기준으로 target과 reference 정합
+        2. 정합 알고리즘 (각도 회전, 이동)으로 블라인드존 형태 매칭
+        3. Diff map 계산 후 도넛형태 안에서 픽셀값 반전
+        4. Otsu 알고리즘으로 블라인드존만 정확히 검출
+        5. Test 이미지에서 해당 부분만 제거
+        """
+        try:
+            # Load target image
+            target_img = Image.open(target_path).convert('L').resize((512, 512))
+            target_array = np.array(target_img, dtype=np.float32) / 255.0  # Normalize to [0, 1]
+
+            # If no reference path provided, return original
+            if reference_path is None:
+                logger.info(f"No reference path - using original image: {target_path.name}")
+                return target_img
+
+            # Find corresponding reference image
+            reference_path = Path(reference_path)
+            target_filename = target_path.name
+
+            # Convert target filename pattern to reference pattern
+            # Target: CY_ON_PL_D000_V3_001.bmp -> Reference: CY_ON_PC_DC_V3_001.bmp
+            # Extract version and ID from target filename
+            import re
+
+            # Parse target filename: CY_ON_PL_D000_V3_001.bmp
+            target_match = re.search(r'CY_ON_PL_D\d+_V(\d+)_(\d+)\.bmp', target_filename)
+            if target_match:
+                version = target_match.group(1)  # V3, V4, etc.
+                image_id = target_match.group(2)  # 001, 201, etc.
+                ref_filename = f"CY_ON_PC_DC_V{version}_{image_id}.bmp"
+            else:
+                # Fallback to original logic if pattern doesn't match
+                ref_filename = target_filename.replace('_PL_', '_')
+
+            # Look for reference image
+            ref_img_path = reference_path / ref_filename
+
+            if not ref_img_path.exists():
+                # Try alternative patterns for backward compatibility
+                alternative_patterns = [
+                    target_filename.replace('CY_ON_PL_', 'CY_ON_PC_DC_'),  # Direct replacement
+                    target_filename.replace('_PL_D000_', '_PC_DC_'),        # Remove angle info
+                    target_filename.replace('_PL_D045_', '_PC_DC_'),
+                    target_filename.replace('_PL_D270_', '_PC_DC_'),
+                    target_filename.replace('_PL_D315_', '_PC_DC_'),
+                ]
+
+                found = False
+                for alt_pattern in alternative_patterns:
+                    alt_path = reference_path / alt_pattern
+                    if alt_path.exists():
+                        ref_img_path = alt_path
+                        found = True
+                        break
+
+                if not found:
+                    logger.warning(f"Reference image not found for {target_filename}, using original")
+                    return target_img
+
+            # Load reference image
+            ref_img = Image.open(ref_img_path).convert('L').resize((512, 512))
+            ref_array = np.array(ref_img, dtype=np.float32) / 255.0  # Normalize to [0, 1]
+
+            # Get donut region parameters based on version
+            version_str = f"V{version}"
+            donut_params = self._get_donut_parameters(version_str)
+
+            # Step 1: Create donut mask for registration
+            donut_mask = self._create_donut_mask(512, 512, donut_params)
+
+            # Step 2: Registration - check cache first, then compute if needed
+            cached_result = self._get_cached_registration(target_filename, ref_img_path.name)
+
+            if cached_result is not None:
+                best_rotation, best_translation = cached_result
+            else:
+                logger.info("Computing new registration...")
+                best_rotation, best_translation = self._register_donut_regions(
+                    target_array, ref_array, donut_mask
+                )
+                # Cache the result
+                self._cache_registration_result(target_filename, ref_img_path.name, best_rotation, best_translation)
+
+            # Step 3: Apply transformation to reference
+            aligned_ref = self._apply_transformation(ref_array, best_rotation, best_translation)
+
+            # Step 4: Calculate diff map in donut region
+            diff_map = target_array - aligned_ref
+
+            # Step 5: Pixel inversion in donut region for better contrast
+            donut_diff = diff_map * donut_mask
+            inverted_donut_diff = (1.0 - donut_diff) * donut_mask
+
+            # Step 6: Apply Otsu thresholding to detect blind zones
+            blind_zone_mask = self._otsu_blind_zone_detection(inverted_donut_diff, donut_mask)
+
+            # Step 7: Keep test image unchanged, save blind zone mask for H_funcs
+            # Store the blind zone mask for later use in distortion operators
+            self._store_blind_zone_mask(target_path.name, blind_zone_mask)
+
+            # Return original target image unchanged
+            preprocessed_img = target_img
+
+            # Log detailed statistics
+            blind_zone_ratio = np.sum(blind_zone_mask > 0) / blind_zone_mask.size * 100
+            donut_coverage = np.sum(donut_mask > 0) / donut_mask.size * 100
+
+            logger.info(f"=== DONUT-BASED REGISTRATION & OTSU BLIND ZONE DETECTION ===")
+            logger.info(f"Target: {target_path.name}")
+            logger.info(f"Reference: {ref_img_path.name}")
+            logger.info(f"Version: {version_str}, Donut coverage: {donut_coverage:.1f}%")
+            logger.info(f"Registration result: rotation={best_rotation:.1f}°, translation=({best_translation[0]:.1f}, {best_translation[1]:.1f})")
+            logger.info(f"Blind zone detected: {blind_zone_ratio:.1f}% of image")
+            logger.info(f"Original image preserved for DDRM processing")
+            logger.info(f"Target image range: [{target_array.min():.3f}, {target_array.max():.3f}]")
+            logger.info(f"=================================================================")
+
+            return preprocessed_img
+
+        except Exception as e:
+            logger.error(f"Failed to preprocess {target_path}: {e}")
+            # Fallback to original image
+            try:
+                return Image.open(target_path).convert('L').resize((512, 512))
+            except:
+                return None
+
+    def _get_donut_parameters(self, version):
+        """Get donut parameters based on version"""
+        donut_params = {
+            'V3': {'inner': 42, 'outer': 230},
+            'V4': {'inner': 25, 'outer': 133},
+            'V5': {'inner': 17, 'outer': 90},
+            'V6': {'inner': 11, 'outer': 63},
+            'V7': {'inner': 9, 'outer': 48}
+        }
+        return donut_params.get(version, {'inner': 25, 'outer': 133})  # Default to V4
+
+    def _create_donut_mask(self, height, width, params):
+        """Create donut-shaped mask"""
+        center_x, center_y = width // 2, height // 2
+        y, x = np.ogrid[:height, :width]
+        distance = np.sqrt((x - center_x)**2 + (y - center_y)**2)
+
+        inner_radius = params['inner']
+        outer_radius = params['outer']
+
+        donut_mask = ((distance >= inner_radius) & (distance <= outer_radius)).astype(np.float32)
+        return donut_mask
+
+    def _register_donut_regions(self, target, reference, donut_mask):
+        """Find best alignment between target and reference in donut region"""
+        from scipy import ndimage
+        from scipy.optimize import minimize_scalar
+
+        # Extract donut regions
+        target_donut = target * donut_mask
+        ref_donut = reference * donut_mask
+
+        best_rotation = 0
+        best_translation = (0, 0)
+        best_score = float('inf')
+
+        # Search rotation angles
+        rotation_angles = np.arange(-15, 16, 3)  # -15 to 15 degrees in 3-degree steps
+
+        for angle in rotation_angles:
+            # Rotate reference
+            rotated_ref = ndimage.rotate(ref_donut, angle, reshape=False, order=1)
+
+            # Search translations
+            for dx in range(-10, 11, 2):  # -10 to 10 pixels in 2-pixel steps
+                for dy in range(-10, 11, 2):
+                    # Translate rotated reference
+                    translated_ref = ndimage.shift(rotated_ref, (dy, dx), order=1)
+                    translated_ref = translated_ref * donut_mask  # Re-apply mask
+
+                    # Calculate similarity score (MSE)
+                    diff = target_donut - translated_ref
+                    score = np.mean(diff[donut_mask > 0]**2)
+
+                    if score < best_score:
+                        best_score = score
+                        best_rotation = angle
+                        best_translation = (dx, dy)
+
+        return best_rotation, best_translation
+
+    def _apply_transformation(self, image, rotation, translation):
+        """Apply rotation and translation to image"""
+        from scipy import ndimage
+
+        # Apply rotation
+        if rotation != 0:
+            transformed = ndimage.rotate(image, rotation, reshape=False, order=1)
+        else:
+            transformed = image.copy()
+
+        # Apply translation
+        if translation != (0, 0):
+            transformed = ndimage.shift(transformed, (translation[1], translation[0]), order=1)
+
+        return transformed
+
+    def _otsu_blind_zone_detection(self, inverted_diff, donut_mask):
+        """Apply Otsu thresholding to detect blind zones with brightness normalization"""
+        from skimage import filters, exposure
+
+        # Get pixels within donut region
+        donut_pixels = inverted_diff[donut_mask > 0]
+
+        if len(donut_pixels) == 0:
+            return np.zeros_like(inverted_diff)
+
+        # Normalize brightness distribution within donut region to improve Otsu performance
+        # Use histogram equalization to reduce brightness differences
+        donut_region = inverted_diff * donut_mask
+
+        # Apply adaptive histogram equalization within donut region
+        if np.max(donut_pixels) > np.min(donut_pixels):  # Check if there's variation
+            # Normalize to 0-1 range first
+            normalized_pixels = (donut_pixels - donut_pixels.min()) / (donut_pixels.max() - donut_pixels.min())
+
+            # Apply histogram equalization
+            equalized_pixels = exposure.equalize_hist(normalized_pixels)
+
+            # Create equalized image
+            equalized_diff = np.zeros_like(inverted_diff)
+            equalized_diff[donut_mask > 0] = equalized_pixels
+
+            # Apply Otsu on equalized data
+            threshold = filters.threshold_otsu(equalized_pixels)
+
+            # --- START MODIFICATION ---
+            # Adjust threshold to detect more blind zone area
+            adjusted_threshold = threshold * 0.85
+            logger.info(f"Otsu threshold: original={threshold:.3f}, adjusted={adjusted_threshold:.3f}")
+            binary_mask = (equalized_diff > adjusted_threshold).astype(np.float32)
+
+            # Apply only within donut region
+            blind_zone_mask = binary_mask * donut_mask
+
+            # Filter out small, noisy components from the blind zone mask
+            if cv2 is not None:
+                H, W = blind_zone_mask.shape[:2]
+                min_area_ratio = 0.001 # Ratio to remove small components
+                min_area = max(1, int(H * W * max(0.0, min_area_ratio)))
+
+                u8 = (blind_zone_mask > 0.5).astype(np.uint8)
+                num, labels, stats, _ = cv2.connectedComponentsWithStats(u8, connectivity=8)
+
+                if num > 1:
+                    clean_mask = np.zeros_like(u8)
+                    for i in range(1, num):
+                        if stats[i, cv2.CC_STAT_AREA] >= min_area:
+                            clean_mask[labels == i] = 1
+                    blind_zone_mask = clean_mask.astype(np.float32)
+                    logger.info(f"Filtered blind zone mask, keeping components with area >= {min_area}")
+            # --- END MODIFICATION ---
+
+        else:
+            # Fallback to original method if no variation
+            threshold = filters.threshold_otsu(donut_pixels)
+            binary_mask = (inverted_diff > threshold).astype(np.float32)
+            logger.info(f"Otsu original method: threshold={threshold:.3f}")
+            # Apply only within donut region
+            blind_zone_mask = binary_mask * donut_mask
+
+        return blind_zone_mask
+
+    def _store_blind_zone_mask(self, filename, mask):
+        """Store blind zone mask for later use in H_funcs"""
+        if not hasattr(self, 'blind_zone_masks'):
+            self.blind_zone_masks = {}
+        self.blind_zone_masks[filename] = mask
+        logger.info(f"Stored blind zone mask for {filename}: {np.sum(mask > 0) / mask.size * 100:.1f}% coverage")
+
+    def get_blind_zone_mask(self, filename):
+        """Get stored blind zone mask for H_funcs"""
+        if hasattr(self, 'blind_zone_masks') and filename in self.blind_zone_masks:
+            return self.blind_zone_masks[filename]
+        return None
+
+    def _load_registration_cache(self):
+        """Load registration cache from file"""
+        try:
+            import json
+            import shutil
+            if self.cache_file.exists():
+                cache_size = self.cache_file.stat().st_size
+                if cache_size == 0:
+                    logger.warning(f"Cache file is empty: {self.cache_file}")
+                    self.registration_cache = {}
+                    return
+
+                with open(self.cache_file, 'r') as f:
+                    cache_data = json.load(f)
+
+                # Validate cache data structure
+                if not isinstance(cache_data, dict):
+                    logger.warning(f"Invalid cache file format: expected dict, got {type(cache_data)}")
+                    self.registration_cache = {}
+                    return
+
+                # Validate each cache entry
+                valid_entries = {}
+                for key, value in cache_data.items():
+                    if (
+                        isinstance(value, dict) and
+                        'rotation' in value and 'translation' in value and
+                        isinstance(value['rotation'], (int, float)) and
+                        isinstance(value['translation'], (list, tuple))):
+                        valid_entries[key] = value
+                    else:
+                        logger.warning(f"Invalid cache entry format for {key}: {value}")
+
+                self.registration_cache = valid_entries
+                logger.info(f"Loaded registration cache: {len(self.registration_cache)} entries")
+
+                if len(valid_entries) != len(cache_data):
+                    logger.info(f"Cleaned {len(cache_data) - len(valid_entries)} invalid cache entries")
+                    # Save the cleaned cache
+                    self._save_registration_cache()
+            else:
+                logger.info("No existing registration cache found, starting fresh")
+                self.registration_cache = {}
+        except json.JSONDecodeError as je:
+            logger.warning(f"Failed to parse registration cache JSON: {je}")
+            logger.info("Backing up corrupted cache and starting fresh")
+            try:
+                backup_path = self.cache_file.with_suffix('.corrupted.bak')
+                shutil.move(str(self.cache_file), str(backup_path))
+                logger.info(f"Corrupted cache backed up to: {backup_path}")
+            except Exception as backup_error:
+                logger.warning(f"Failed to backup corrupted cache: {backup_error}")
+            self.registration_cache = {}
+        except Exception as e:
+            logger.warning(f"Failed to load registration cache: {e}")
+            self.registration_cache = {}
+
+    def _save_registration_cache(self):
+        """Save registration cache to file"""
+        try:
+            import json
+            import tempfile
+            import shutil
+            import os
+
+            # Validate cache data before saving
+            for key, value in self.registration_cache.items():
+                if not isinstance(value, dict):
+                    logger.warning(f"Invalid cache entry type for {key}: {type(value)}")
+                    continue
+                if 'rotation' not in value or 'translation' not in value:
+                    logger.warning(f"Missing required fields in cache entry for {key}")
+                    continue
+                if not isinstance(value['rotation'], (int, float)):
+                    logger.warning(f"Invalid rotation type for {key}: {type(value['rotation'])}")
+                    continue
+                if not isinstance(value['translation'], (list, tuple)):
+                    logger.warning(f"Invalid translation type for {key}: {type(value['translation'])}")
+                    continue
+
+            # Write to temporary file first, then move to avoid corruption
+            temp_file = self.cache_file.with_suffix('.tmp')
+
+            # Ensure directory exists
+            temp_file.parent.mkdir(parents=True, exist_ok=True)
+
+            with open(temp_file, 'w') as f:
+                json.dump(self.registration_cache, f, indent=2)
+
+            # Verify temp file was written correctly
+            if not temp_file.exists():
+                raise FileNotFoundError(f"Temporary cache file was not created: {temp_file}")
+
+            temp_size = temp_file.stat().st_size
+            if temp_size == 0:
+                raise ValueError(f"Temporary cache file is empty: {temp_file}")
+
+            # Verify JSON can be read back
+            try:
+                with open(temp_file, 'r') as f:
+                    test_load = json.load(f)
+                logger.info(f"Cache validation successful: {len(test_load)} entries")
+            except json.JSONDecodeError as je:
+                raise ValueError(f"Invalid JSON in temporary cache file: {je}")
+
+            # Atomically replace the cache file
+            shutil.move(str(temp_file), str(self.cache_file))
+
+            # Verify final file exists
+            if not self.cache_file.exists():
+                raise FileNotFoundError(f"Cache file was not created after move: {self.cache_file}")
+
+            logger.info(f"Saved registration cache: {len(self.registration_cache)} entries to {self.cache_file}")
+
+        except Exception as e:
+            logger.error(f"Failed to save registration cache: {e}")
+            # Clean up temp file if it exists
+            temp_file = self.cache_file.with_suffix('.tmp')
+            if temp_file.exists():
+                try:
+                    temp_file.unlink()
+                    logger.info(f"Cleaned up temporary cache file: {temp_file}")
+                except Exception as cleanup_error:
+                    logger.warning(f"Failed to clean up temp file: {cleanup_error}")
+
+    def _get_cache_key(self, target_filename, ref_filename):
+        """Generate cache key for target-reference pair"""
+        return f"{target_filename}_{ref_filename}"
+
+    def _get_cached_registration(self, target_filename, ref_filename):
+        """Get cached registration result"""
+        cache_key = self._get_cache_key(target_filename, ref_filename)
+        if cache_key in self.registration_cache:
+            result = self.registration_cache[cache_key]
+            logger.info(f"Using cached registration for {target_filename}: rotation={result['rotation']}°, translation={result['translation']}")
+            return result['rotation'], tuple(result['translation'])
+        return None
+
+    def _cache_registration_result(self, target_filename, ref_filename, rotation, translation):
+        """Cache registration result"""
+        cache_key = self._get_cache_key(target_filename, ref_filename)
+
+        # Ensure proper data types for JSON serialization
+        if hasattr(rotation, 'item'):  # numpy scalar
+            rotation = rotation.item()
+        elif hasattr(rotation, 'dtype'):  # numpy array
+            rotation = float(rotation)
+        else:
+            rotation = float(rotation)
+
+        # Convert translation to list of floats
+        if hasattr(translation, 'tolist'):  # numpy array
+            translation = translation.tolist()
+        else:
+            translation = [float(x) for x in translation]
+
+        self.registration_cache[cache_key] = {
+            'rotation': rotation,
+            'translation': translation
+        }
+        logger.info(f"Cached registration for {target_filename}: rotation={rotation}°, translation={translation}")
+        self._save_registration_cache()
 
     def save_artifacts(self, output_dir):
         """Save estimated artifacts for analysis"""
@@ -589,6 +1050,50 @@ class UltrasoundDDRMRunner(Diffusion):
 
         logger.info(f"Artifacts saved to {output_dir}")
 
+    def _save_individual_artifacts(self, filename, H_funcs, output_dir):
+        """Save individual image's z_est, H_est, and detected blind zone mask"""
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        # Extract base filename without extension
+        base_name = Path(filename).stem
+
+        # Save z_est (noise pattern) if available
+        if hasattr(H_funcs, 'noise_pattern') and H_funcs.noise_pattern is not None:
+            z_est_path = output_dir / f"z_est_{base_name}.npy"
+            if isinstance(H_funcs.noise_pattern, torch.Tensor):
+                np.save(z_est_path, H_funcs.noise_pattern.cpu().numpy())
+            else:
+                np.save(z_est_path, H_funcs.noise_pattern)
+            logger.info(f"Saved z_est for {filename}")
+
+        # Save H_est (distortion map) if available
+        if hasattr(H_funcs, 'mask_tensor') and H_funcs.mask_tensor is not None:
+            h_est_path = output_dir / f"H_est_{base_name}.npy"
+            if isinstance(H_funcs.mask_tensor, torch.Tensor):
+                np.save(h_est_path, H_funcs.mask_tensor.cpu().numpy())
+            else:
+                np.save(h_est_path, H_funcs.mask_tensor)
+            logger.info(f"Saved H_est for {filename}")
+
+        # Save detected blind zone mask if available
+        if hasattr(H_funcs, 'detected_blind_zone_mask') and H_funcs.detected_blind_zone_mask is not None:
+            mask_path = output_dir / f"blind_zone_mask_{base_name}.npy"
+            np.save(mask_path, H_funcs.detected_blind_zone_mask)
+            logger.info(f"Saved blind zone mask for {filename}")
+
+            # Also save as PNG for visualization
+            mask_png_path = output_dir / f"blind_zone_mask_{base_name}.png"
+            mask_img = (H_funcs.detected_blind_zone_mask * 255).astype(np.uint8)
+            from PIL import Image
+            Image.fromarray(mask_img, mode='L').save(mask_png_path)
+
+        # Save additional distortion information if available
+        if hasattr(H_funcs, 'distortion_mask') and H_funcs.distortion_mask is not None:
+            distortion_path = output_dir / f"distortion_mask_{base_name}.npy"
+            np.save(distortion_path, H_funcs.distortion_mask)
+            logger.info(f"Saved distortion mask for {filename}")
+
     def _save_tissue_analysis(self, x_orig, y_corrupted, version, image_path, output_dir, H_funcs):
         """
         조직 보호 분석 시각화 저장
@@ -604,19 +1109,40 @@ class UltrasoundDDRMRunner(Diffusion):
             # 이미지를 numpy로 변환
             orig_np = x_orig.squeeze().cpu().numpy()
 
-            # 조직 마스크, 블라인드존 마스크 가져오기
-            if H_funcs.tissue_mask is None or H_funcs.blind_zone_processing_mask is None:
-                logger.warning("조직 마스크가 없어서 시각화를 건너뜀")
-                return
+            # 검출된 블라인드존 마스크 사용 (도넛 기반 + Otsu)
+            if hasattr(H_funcs, 'detected_blind_zone_mask') and H_funcs.detected_blind_zone_mask is not None:
+                logger.info("Using detected blind zone mask for tissue analysis")
+                detected_blind_zone = H_funcs.detected_blind_zone_mask
 
-            tissue_mask = H_funcs.tissue_mask
-            blind_zone_mask = H_funcs.blind_zone_processing_mask
+                # 기존 조직/블라인드존 마스크와 검출된 마스크 비교
+                if H_funcs.tissue_mask is not None:
+                    tissue_mask = H_funcs.tissue_mask
+                    blind_zone_mask = H_funcs.blind_zone_processing_mask
 
-            # 전체 블라인드존 마스크 (원본)
-            full_blind_zone = (H_funcs.distortion_mask > 0.1).astype(np.float32)
+                    # 전체 블라인드존 마스크 (원본 도넛 영역)
+                    full_blind_zone = (H_funcs.distortion_mask > 0.1).astype(np.float32)
 
-            # 보호된 조직 영역 (조직 ∩ 전체블라인드존)
-            protected_tissue = tissue_mask * full_blind_zone
+                    # 보호된 조직 영역 (조직 ∩ 검출되지 않은 영역)
+                    protected_tissue = tissue_mask * (1.0 - detected_blind_zone) * full_blind_zone
+                else:
+                    # 조직 마스크가 없으면 간단한 분석
+                    tissue_mask = np.zeros_like(detected_blind_zone)
+                    blind_zone_mask = detected_blind_zone
+                    full_blind_zone = detected_blind_zone
+                    protected_tissue = np.zeros_like(detected_blind_zone)
+
+                logger.info(f"Detected blind zone coverage: {np.sum(detected_blind_zone > 0) / detected_blind_zone.size * 100:.1f}%")
+            else:
+                # Fallback to original method
+                if H_funcs.tissue_mask is None or H_funcs.blind_zone_processing_mask is None:
+                    logger.warning("No tissue mask or detected blind zone mask available")
+                    return
+
+                tissue_mask = H_funcs.tissue_mask
+                blind_zone_mask = H_funcs.blind_zone_processing_mask
+                full_blind_zone = (H_funcs.distortion_mask > 0.1).astype(np.float32)
+                protected_tissue = tissue_mask * full_blind_zone
+                detected_blind_zone = blind_zone_mask
 
             # 3x4 subplot 생성
             fig, axes = plt.subplots(3, 4, figsize=(20, 15))
@@ -643,9 +1169,9 @@ class UltrasoundDDRMRunner(Diffusion):
             axes[0,3].axis('off')
 
             # Row 2: 처리 영역들
-            axes[1,0].imshow(blind_zone_mask, cmap='Oranges', alpha=0.8)
+            axes[1,0].imshow(detected_blind_zone, cmap='Reds', alpha=0.8)
             axes[1,0].imshow(orig_np, cmap='gray', alpha=0.5)
-            axes[1,0].set_title('Pure Blind Zone (Strong Processing)')
+            axes[1,0].set_title(f'Detected Blind Zone ({np.sum(detected_blind_zone > 0) / detected_blind_zone.size * 100:.1f}%)')
             axes[1,0].axis('off')
 
             # 배경 영역
@@ -669,8 +1195,8 @@ class UltrasoundDDRMRunner(Diffusion):
             plt.colorbar(im, ax=axes[1,2], shrink=0.6)
 
             # 가시 영역 shift 정보 가져오기
-            angle_offset = H_funcs._get_angle_center_offset()
-            
+            # 중심점 고정 (angle offset 제거)
+
             # 기본 버전 정보
             version_info = {
                 'V3': 'Large Blind Zone\nStrong Distortion',
@@ -680,17 +1206,16 @@ class UltrasoundDDRMRunner(Diffusion):
                 'V7': 'Minimal Blind Zone\nFine Distortion'
             }
 
-            version_text = f"""{version} Characteristics:
+            version_text = f"""
+{version} Characteristics:
 
 {version_info.get(version, 'Unknown Version')}
-
-Visible Region Shift:
-• Center offset: ({angle_offset['x']:+d}, {angle_offset['y']:+d}) px
 
 Processing Method:
 ✓ Tissue protection activated
 ✓ Differential correction strength
-✓ Progressive processing"""
+✓ Progressive processing
+✓ Center fixed at image center"""
 
             axes[1,3].text(0.05, 0.95, version_text, transform=axes[1,3].transAxes,
                           verticalalignment='top', fontsize=11,
@@ -715,7 +1240,8 @@ Processing Method:
             protected_coverage = np.sum(protected_tissue) / protected_tissue.size * 100
             pure_blind_coverage = np.sum(blind_zone_mask) / blind_zone_mask.size * 100
 
-            stats_text = f"""Tissue Protection Statistics:
+            stats_text = f"""
+Tissue Protection Statistics:
 
 • Detected Tissue: {tissue_coverage:.1f}%
 • Full Blind Zone: {blind_zone_coverage:.1f}%
@@ -723,8 +1249,8 @@ Processing Method:
 • Pure Blind Zone: {pure_blind_coverage:.1f}%
 
 Spatial Configuration:
-• Visible region shift: ({angle_offset['x']:+d}, {angle_offset['y']:+d}) pixels
-• Detection center adjusted for angle
+• Center fixed at image center (256, 256)
+• Detection center fixed
 
 Processing Strategy:
 → Tissue Area: 20-60% gentle correction
@@ -733,8 +1259,7 @@ Processing Strategy:
 
 Protection Effect:
 → Tissue Loss Prevention: {protected_coverage:.1f}%
-→ Blind Zone Removal: {pure_blind_coverage:.1f}%
-"""
+→ Blind Zone Removal: {pure_blind_coverage:.1f}%"""
 
             axes[2,1].text(0.05, 0.95, stats_text, transform=axes[2,1].transAxes,
                           verticalalignment='top', fontsize=11,
@@ -751,32 +1276,26 @@ Protection Effect:
             # 가시 영역 시각화 (수정된 shift 적용)
             height, width = orig_np.shape
             center_y, center_x = height // 2, width // 2
-            shifted_center_y = center_y + angle_offset['y']
-            shifted_center_x = center_x + angle_offset['x']
-            
-            # 올바른 shifted center로 가시 영역 원 생성
+
+            # 가시 영역 원 생성 (중심 고정)
             y, x = np.ogrid[:height, :width]
-            distance = np.sqrt((x - shifted_center_x)**2 + (y - shifted_center_y)**2)
-            
+            distance = np.sqrt((x - center_x)**2 + (y - center_y)**2)
+
             version_visible_radius = {
                 'V3': 240, 'V4': 150, 'V5': 110, 'V6': 80, 'V7': 65
             }
             visible_radius = version_visible_radius.get(version, 110)
             visible_region = (distance <= visible_radius).astype(np.float32)
-            
+
             # 가시 영역과 도넛 영역을 함께 표시
             axes[2,3].imshow(orig_np, cmap='gray', alpha=0.6)
             axes[2,3].contour(visible_region, levels=[0.5], colors=['cyan'], linewidths=2, linestyles='-')
             axes[2,3].contour(full_blind_zone, levels=[0.1], colors=['blue'], linewidths=1, linestyles='--')
-            
-            # 중심점 표시
-            
-            axes[2,3].plot(center_x, center_y, 'ro', markersize=8, label='Original Center')
-            axes[2,3].plot(shifted_center_x, shifted_center_y, 'co', markersize=8, label='Shifted Center')
-            axes[2,3].arrow(center_x, center_y, angle_offset['x'], angle_offset['y'], 
-                           head_width=10, head_length=8, fc='yellow', ec='orange', linewidth=2)
-            
-            axes[2,3].set_title(f'Visible Region Shift\nCyan: Visible Circle, Blue: Blind Zone')
+
+            # 중심점 표시 (고정된 중심점만)
+            axes[2,3].plot(center_x, center_y, 'ro', markersize=8, label='Fixed Center')
+
+            axes[2,3].set_title(f'Fixed Center Processing\nCyan: Visible Circle, Blue: Blind Zone')
             axes[2,3].legend(loc='upper right', fontsize=8)
             axes[2,3].axis('off')
 
@@ -844,7 +1363,8 @@ def run_ultrasound_ddrm(args, config):
             sigma_0=getattr(args, 'sigma_0', 0.05),
             save_steps=save_steps,
             optuna_mode=getattr(args, 'optuna_mode', False),
-            no_save_images=getattr(args, 'no_save_images', False)
+            no_save_images=getattr(args, 'no_save_images', False),
+            reference_path=getattr(args, 'cy_on_path', None)
         )
 
         logger.info(f"Processed {len(results)} images successfully")
